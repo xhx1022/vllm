@@ -42,7 +42,7 @@ class Request:
         priority: int = 0,
         trace_headers: Optional[Mapping[str, str]] = None,
         block_hasher: Optional[Callable[["Request"],
-                                        list["BlockHash"]]] = None,
+                                        list["BlockHash"]]] = None
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -56,6 +56,8 @@ class Request:
         self.arrival_time = arrival_time if arrival_time is not None else \
             time.time()
 
+        # TODO: hardcode for now
+        self.expert_ids = torch.zeros(48, 0, 8) # hardcode for now
         self.status = RequestStatus.WAITING
         self.use_structured_output = False
         self.events: list[EngineCoreEvent] = []

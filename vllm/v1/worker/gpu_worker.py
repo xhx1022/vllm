@@ -34,6 +34,10 @@ from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import WorkerBase
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsCapturer
+)
+from vllm.distributed import get_tensor_model_parallel_rank
 
 logger = init_logger(__name__)
 
@@ -94,6 +98,18 @@ class Worker(WorkerBase):
                     torch_profiler_trace_dir, use_gzip=True))
         else:
             self.profiler = None
+
+
+
+    def init_routed_experts_capturer(self):
+        if self.model_config.enable_return_routed_experts and get_tensor_model_parallel_rank() == 0:
+            routed_experts_capturer = RoutedExpertsCapturer.create(
+                self.model_config.enable_return_routed_experts
+            )
+            routed_experts_capturer.init_buffer(
+                max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
+                model_config=self.model_config,
+            )
 
     def sleep(self, level: int = 1) -> None:
         from vllm.device_allocator.cumem import CuMemAllocator
@@ -193,6 +209,9 @@ class Worker(WorkerBase):
                     f"{GiB(self.requested_memory)} GiB). Decrease GPU memory "
                     f"utilization or reduce GPU memory used by other processes."
                 )
+
+            self.init_routed_experts_capturer()
+
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
@@ -444,8 +463,17 @@ class Worker(WorkerBase):
                     all_gather_group=get_tp_group(),
                     all_gather_tensors=all_gather_tensors))
 
+        if get_tensor_model_parallel_rank() == 0:
+            RoutedExpertsCapturer.get_instance().clear_buffer()
+
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
+
+
+        if get_tensor_model_parallel_rank() == 0:
+            output.output_routed_experts = RoutedExpertsCapturer.get_instance().get_captured_experts()
+
+
         if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput)):
             return output
 
@@ -470,6 +498,7 @@ class Worker(WorkerBase):
 
         output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
         output.kv_connector_output = kv_connector_output
+
         return output
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:

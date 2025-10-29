@@ -44,7 +44,9 @@ from vllm.utils import (cdiv, direct_register_custom_op, has_deep_ep, has_pplx,
                         round_up)
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
-
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsCapturer
+)
 if current_platform.is_cuda_alike():
     from .fused_batched_moe import BatchedTritonExperts
     from .fused_moe import (TritonExperts, eplb_map_to_physical_and_record,
@@ -81,8 +83,9 @@ if current_platform.is_tpu():
 else:
     fused_moe_pallas = None  # type: ignore
 
+# from vllm.model_executor.models.utils import extract_layer_index
+from vllm.distributed import get_tensor_model_parallel_rank  
 logger = init_logger(__name__)
-
 
 class FusedMoeWeightScaleSupported(Enum):
     TENSOR = "tensor"
@@ -334,6 +337,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 )
             self.flashinfer_cutlass_moe = None  # type: ignore
 
+        
+
     def maybe_make_prepare_finalize(
             self) -> Optional[FusedMoEPrepareAndFinalize]:
         if self.rocm_aiter_moe_enabled:
@@ -575,6 +580,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             global_num_experts=global_num_experts,
             zero_expert_num=zero_expert_num,
             zero_expert_type=zero_expert_type)
+                
+
+        if get_tensor_model_parallel_rank() == 0:
+            RoutedExpertsCapturer.get_instance().capture(
+                layer_id=layer.get_layer_id,
+                topk_ids=topk_ids,
+            )
+
 
         if self.rocm_aiter_moe_enabled:
             assert self.fused_experts is None
@@ -1007,6 +1020,8 @@ class FusedMoE(CustomOp):
             raise ValueError("Duplicate layer name: {}".format(prefix))
         compilation_config.static_forward_context[prefix] = self
         self.layer_name = prefix
+        from vllm.model_executor.models.utils import extract_layer_index
+        self.layer_id = extract_layer_index(self.layer_name)
 
         self.enable_eplb = enable_eplb
         self.expert_load_view: Optional[torch.Tensor] = None
@@ -1176,6 +1191,10 @@ class FusedMoE(CustomOp):
         return None
 
     @property
+    def get_layer_id(self):
+        return self.layer_id
+
+    @property
     def tp_size(self):
         return self.moe_parallel_config.tp_size
 
@@ -1220,6 +1239,7 @@ class FusedMoE(CustomOp):
         return (self.moe_quant_config is not None
                 and self.moe_quant_config.quant_dtype == "nvfp4"
                 and self.moe_config.use_flashinfer_cutlass_kernels)
+
 
     def update_expert_map(self):
         # ep_size and ep_rank should already be updated

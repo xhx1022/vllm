@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from __future__ import annotations
-
+import torch
+import json
 import itertools
 import time
 from collections import defaultdict
@@ -858,6 +859,42 @@ class Scheduler(SchedulerInterface):
             )
         return structured_output_request_ids, bitmask
 
+    def save_expert_ids_to_json(self, request: Request, file_path="logs/r3.json"):
+        """将request的expert_ids保存到JSON文件中
+        
+        Args:
+            request: 请求对象，包含request_id和expert_ids
+            file_path: 保存的JSON文件路径，默认为"logs/r3.json"
+        """
+        expert_ids = request.expert_ids.numpy()
+        num_layers, num_tokens, topk_expert = expert_ids.shape
+        expert_ids_json = []
+        
+        for layer_idx in range(num_layers):
+            layer_entry = {
+                "layer": int(layer_idx),
+                "tokens": [
+                    {
+                        "token_idx": int(t),
+                        "token_id": int(request.all_token_ids[t]),
+                        "topk_experts": expert_ids[layer_idx, t].tolist()
+                    }
+                    for t in range(num_tokens)
+                ]
+            }
+            expert_ids_json.append(layer_entry)
+
+        data = {
+            "request_id": request.request_id,
+            "client_index": request.client_index,
+            "expert_ids": expert_ids_json
+        }
+
+        # 以追加形式写入 jsonl（每行一个 JSON）
+        with open(file_path, "a") as f:
+            f.write(json.dumps(data) + "\n")
+
+
     def update_from_output(
         self,
         scheduler_output: SchedulerOutput,
@@ -881,6 +918,8 @@ class Scheduler(SchedulerInterface):
         # to avoid expensive operations inside the loop.
         stopped_running_reqs: set[Request] = set()
         stopped_preempted_reqs: set[Request] = set()
+
+        id = 0
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
             request = self.requests.get(req_id)
@@ -889,6 +928,12 @@ class Scheduler(SchedulerInterface):
                 # request is aborted while the model is executing it (e.g.,
                 # in pipeline parallelism).
                 continue
+
+
+            if model_runner_output.output_routed_experts is not None:
+                captured = model_runner_output.output_routed_experts[:, id:id + num_tokens_scheduled, :]
+                id += num_tokens_scheduled
+                request.expert_ids = torch.cat([request.expert_ids, captured], dim=1)
 
             req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids = sampled_token_ids[
@@ -936,6 +981,9 @@ class Scheduler(SchedulerInterface):
                 else:
                     stopped_preempted_reqs.add(request)
 
+                # # 把request的req_id和expert_ids保存到文件json中
+                self.save_expert_ids_to_json(request)
+
             # Extract sample logprobs if needed.
             if request.sampling_params is not None \
                 and request.sampling_params.logprobs is not None and logprobs:
@@ -977,6 +1025,8 @@ class Scheduler(SchedulerInterface):
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
+
+
 
         # Remove the stopped requests from the running and waiting queues.
         if stopped_running_reqs:

@@ -288,6 +288,9 @@ class ModelConfig:
     skip_mm_profiling: InitVar[Optional[bool]] = None
     video_pruning_rate: InitVar[Optional[float]] = None
 
+    """Whether to return routed experts."""
+    enable_return_routed_experts: bool = True  
+     
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
