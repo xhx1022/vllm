@@ -870,6 +870,8 @@ class Scheduler(SchedulerInterface):
         expert_ids = request.expert_ids.numpy()
         num_layers, num_tokens, topk_expert = expert_ids.shape
         expert_ids_json = []
+
+        # assert len(request.all_token_ids) == num_tokens, f"len(request.all_token_ids) != num_tokens, {len(request.all_token_ids)} != {num_tokens}"
         
         for layer_idx in range(num_layers):
             layer_entry = {
@@ -931,7 +933,7 @@ class Scheduler(SchedulerInterface):
                 # in pipeline parallelism).
                 continue
 
-
+            # TODO: support multiple requests
             if model_runner_output.output_routed_experts is not None:
                 captured = model_runner_output.output_routed_experts[:, id:id + num_tokens_scheduled, :]
                 id += num_tokens_scheduled

@@ -582,11 +582,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             zero_expert_type=zero_expert_type)
                 
 
-        if get_tensor_model_parallel_rank() == 0:
-            RoutedExpertsCapturer.get_instance().capture(
-                layer_id=layer.get_layer_id,
-                topk_ids=topk_ids,
-            )
+        # if get_tensor_model_parallel_rank() == 0:
+        RoutedExpertsCapturer.get_instance().capture(
+            layer_id=layer.get_layer_id,
+            topk_ids=topk_ids,
+        )
 
 
         if self.rocm_aiter_moe_enabled:

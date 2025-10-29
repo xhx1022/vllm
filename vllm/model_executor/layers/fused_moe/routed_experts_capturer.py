@@ -63,8 +63,8 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
                     model_config.hf_text_config.num_experts_per_tok,
                 ),
                 dtype=torch.int32,
-                device="cpu",
-                pin_memory=True # todo: kernel
+                device="cuda",
+                # pin_memory=True # todo: kernel
             )
             logger.debug(
                 f"Initialized routed experts capturer host buffer with shape {self._experts_capturer_host_buffer.shape}."
