@@ -56,7 +56,7 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
             model_config.enable_return_routed_experts
             and self._experts_capturer_host_buffer is None
         ):
-            self._experts_capturer_host_buffer = torch.zeros(
+            self._experts_capturer_host_buffer = torch.empty(
                 (
                     model_config.hf_text_config.num_hidden_layers,
                     max_num_batched_tokens,
@@ -64,6 +64,7 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
                 ),
                 dtype=torch.int32,
                 device="cpu",
+                pin_memory=True # todo: kernel
             )
             logger.debug(
                 f"Initialized routed experts capturer host buffer with shape {self._experts_capturer_host_buffer.shape}."
@@ -73,7 +74,7 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
         if self._experts_capturer_host_buffer is None:
             raise RuntimeError("Buffer not initialized.")
         batch_size, num_routed_experts = topk_ids.shape
-        self._experts_capturer_host_buffer[layer_id, :batch_size, : ] = topk_ids.cpu()# to("cpu", non_blocking=True)
+        self._experts_capturer_host_buffer[layer_id, :batch_size, : ] = topk_ids # to("cpu", non_blocking=True) pinmemory=True
 
     def clear_buffer(self):
         if self._experts_capturer_host_buffer is not None:
