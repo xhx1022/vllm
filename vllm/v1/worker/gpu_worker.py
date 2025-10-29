@@ -464,8 +464,8 @@ class Worker(WorkerBase):
                     all_gather_group=get_tp_group(),
                     all_gather_tensors=all_gather_tensors))
 
-        if get_tensor_model_parallel_rank() == 0:
-            RoutedExpertsCapturer.get_instance().clear_buffer()
+
+        RoutedExpertsCapturer.get_instance().clear_buffer()
 
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)

@@ -56,7 +56,7 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
             model_config.enable_return_routed_experts
             and self._experts_capturer_host_buffer is None
         ):
-            self._experts_capturer_host_buffer = torch.empty(
+            self._experts_capturer_host_buffer = torch.zero(
                 (
                     model_config.hf_text_config.num_hidden_layers,
                     max_num_batched_tokens,
@@ -64,7 +64,6 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
                 ),
                 dtype=torch.int32,
                 device="cuda",
-                # pin_memory=True # todo: kernel
             )
             logger.debug(
                 f"Initialized routed experts capturer host buffer with shape {self._experts_capturer_host_buffer.shape}."
