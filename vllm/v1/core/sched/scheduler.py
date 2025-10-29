@@ -4,6 +4,7 @@
 from __future__ import annotations
 import torch
 import json
+import os
 import itertools
 import time
 from collections import defaultdict
@@ -891,6 +892,7 @@ class Scheduler(SchedulerInterface):
         }
 
         # 以追加形式写入 jsonl（每行一个 JSON）
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
         with open(file_path, "a") as f:
             f.write(json.dumps(data) + "\n")
 

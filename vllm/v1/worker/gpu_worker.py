@@ -102,6 +102,7 @@ class Worker(WorkerBase):
 
 
     def init_routed_experts_capturer(self):
+        logger.info(f"Initializing routed experts capturer, enable_return_routed_experts: {self.model_config.enable_return_routed_experts}")
         if self.model_config.enable_return_routed_experts and get_tensor_model_parallel_rank() == 0:
             routed_experts_capturer = RoutedExpertsCapturer.create(
                 self.model_config.enable_return_routed_experts

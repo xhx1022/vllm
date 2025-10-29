@@ -178,6 +178,8 @@ class ModelConfig:
     graph and always execute the model in eager mode. If False, we will use
     CUDA graph and eager execution in hybrid for maximal performance and
     flexibility."""
+    enable_return_routed_experts: bool = False
+    """Whether to return routed experts."""
     max_logprobs: int = 20
     """Maximum number of log probabilities to return when `logprobs` is
     specified in `SamplingParams`. The default value comes the default for the
@@ -287,9 +289,6 @@ class ModelConfig:
     interleave_mm_strings: InitVar[Optional[bool]] = None
     skip_mm_profiling: InitVar[Optional[bool]] = None
     video_pruning_rate: InitVar[Optional[float]] = None
-
-    """Whether to return routed experts."""
-    enable_return_routed_experts: bool = True  
      
     def compute_hash(self) -> str:
         """
