@@ -56,7 +56,7 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
             model_config.enable_return_routed_experts
             and self._experts_capturer_host_buffer is None
         ):
-            self._experts_capturer_host_buffer = torch.zero(
+            self._experts_capturer_host_buffer = torch.zeros(
                 (
                     model_config.hf_text_config.num_hidden_layers,
                     max_num_batched_tokens,

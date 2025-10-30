@@ -466,7 +466,6 @@ class Worker(WorkerBase):
 
 
         RoutedExpertsCapturer.get_instance().clear_buffer()
-
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
 

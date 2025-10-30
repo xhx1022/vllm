@@ -889,9 +889,10 @@ class Scheduler(SchedulerInterface):
 
         data = {
             "request_id": request.request_id,
-            "client_index": request.client_index,
+            # "client_index": request.client_index,
             "expert_ids": expert_ids_json
         }
+
 
         # 以追加形式写入 jsonl（每行一个 JSON）
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
