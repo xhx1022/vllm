@@ -42,6 +42,7 @@ class CompletionOutput:
     token_ids: GenericSequence[int]
     cumulative_logprob: Optional[float]
     logprobs: Optional[SampleLogprobs]
+    routed_expert_ids: Optional[list[list[list[int]]]]
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
     lora_request: Optional[LoRARequest] = None
@@ -88,6 +89,7 @@ class RequestOutput:
                           For encoder/decoder models, this is the
                           decoder input prompt token ids.
         prompt_logprobs: The log probabilities to return per prompt token.
+        routed_expert_ids: The routed expert ids for the request.
         outputs: The output sequences of the request.
         finished: Whether the whole request is finished.
         metrics: Metrics associated with the request.
@@ -106,6 +108,7 @@ class RequestOutput:
         prompt: Optional[str],
         prompt_token_ids: Optional[list[int]],
         prompt_logprobs: Optional[PromptLogprobs],
+        routed_expert_ids: Optional[list[list[list[int]]]],
         outputs: list[CompletionOutput],
         finished: bool,
         metrics: Optional[RequestMetrics] = None,
@@ -128,6 +131,7 @@ class RequestOutput:
         self.prompt_token_ids = prompt_token_ids
         self.multi_modal_placeholders = multi_modal_placeholders or {}
         self.prompt_logprobs = prompt_logprobs
+        self.routed_expert_ids = routed_expert_ids
         self.outputs = outputs
         self.finished = finished
         self.metrics = metrics
@@ -136,6 +140,7 @@ class RequestOutput:
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
         self.kv_transfer_params = kv_transfer_params
+        
 
     def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
         """Merge subsequent RequestOutput into this one"""

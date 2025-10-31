@@ -867,7 +867,7 @@ class Scheduler(SchedulerInterface):
             request: 请求对象，包含request_id和expert_ids
             file_path: 保存的JSON文件路径，默认为"logs/r3.json"
         """
-        expert_ids = request.expert_ids.numpy()
+        expert_ids = request.output_routed_experts.numpy()
         num_layers, num_tokens, topk_expert = expert_ids.shape
         expert_ids_json = []
 
@@ -938,7 +938,10 @@ class Scheduler(SchedulerInterface):
             if model_runner_output.output_routed_experts is not None:
                 captured = model_runner_output.output_routed_experts[:, id:id + num_tokens_scheduled, :]
                 id += num_tokens_scheduled
-                request.expert_ids = torch.cat([request.expert_ids, captured], dim=1)
+                if request.output_routed_experts is None:
+                    request.output_routed_experts = captured
+                else:
+                    request.output_routed_experts = torch.cat([request.output_routed_experts, captured], dim=1)
 
             req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids = sampled_token_ids[

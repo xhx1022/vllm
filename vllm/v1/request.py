@@ -57,7 +57,7 @@ class Request:
             time.time()
 
         # TODO: hardcode for now
-        self.expert_ids = torch.zeros(48, 0, 8) # hardcode for now
+        self.output_routed_experts = None
         self.status = RequestStatus.WAITING
         self.use_structured_output = False
         self.events: list[EngineCoreEvent] = []
