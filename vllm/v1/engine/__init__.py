@@ -118,6 +118,7 @@ class EngineCoreOutput(
     # The number of tokens with prefix cache hits.
     num_cached_tokens: int = 0
     routed_experts: Optional[np.ndarray] = None
+    routed_experts: Optional[np.ndarray] = None
 
     @property
     def finished(self) -> bool:
