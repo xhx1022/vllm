@@ -243,7 +243,6 @@ class RequestState:
             prompt=self.prompt,
             prompt_token_ids=self.prompt_token_ids,
             prompt_logprobs=prompt_logprobs,
-            # routed_expert_ids=routed_expert_ids,
             outputs=cast(list[CompletionOutput], outputs),
             finished=finished,
             kv_transfer_params=kv_transfer_params,
