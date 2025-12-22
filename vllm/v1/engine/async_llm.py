@@ -45,6 +45,7 @@ from vllm.v1.executor.abstract import Executor
 from vllm.v1.metrics.loggers import StatLoggerFactory, StatLoggerManager
 from vllm.v1.metrics.prometheus import shutdown_prometheus
 from vllm.v1.metrics.stats import IterationStats
+from vllm.v1.metrics.reader import Metric, get_metrics_snapshot
 
 logger = init_logger(__name__)
 
@@ -423,6 +424,10 @@ class AsyncLLM(EngineClient):
             if self.log_requests:
                 logger.info("Request %s failed.", request_id)
             raise EngineGenerateError() from e
+        
+    def get_metrics(self) -> list[Metric]:
+        assert self.log_stats, "Stat logging disabled"
+        return get_metrics_snapshot()
 
     def _run_output_handler(self):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
