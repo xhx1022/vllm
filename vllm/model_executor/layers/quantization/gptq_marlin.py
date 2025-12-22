@@ -33,6 +33,9 @@ from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            RowvLLMParameter)
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsCapturer
+)
 
 logger = init_logger(__name__)
 
@@ -676,6 +679,12 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype)
+
+        if RoutedExpertsCapturer.get_instance() is not None:
+            RoutedExpertsCapturer.get_instance().capture(
+                layer_id=layer.get_layer_id,
+                topk_ids=topk_ids,
+            )
 
         return torch.ops.vllm.fused_marlin_moe(
             x,

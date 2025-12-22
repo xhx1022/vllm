@@ -2,7 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from __future__ import annotations
-
+import torch
+import numpy as np
+import json
+import os
 import itertools
 import time
 from collections import defaultdict
@@ -34,6 +37,7 @@ from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedExpertsReader
 
 logger = init_logger(__name__)
 
@@ -173,6 +177,14 @@ class Scheduler(SchedulerInterface):
             dcp_world_size=self.dcp_world_size,
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
+        self.max_num_kv_tokens = ((kv_cache_config.num_blocks // len(kv_cache_config.kv_cache_groups)) + 1)* self.block_size
+        logger.info(f"[debug] max_num_kv_tokens in Scheduler: {self.max_num_kv_tokens}")
+        self.routed_experts_reader = RoutedExpertsReader.create(enable=self.vllm_config.model_config.enable_return_routed_experts)
+        if ":" in self.vllm_config.instance_id: # for async mode in verl
+            self.instance_id = self.vllm_config.instance_id.rsplit(":", 1)[-1]
+        else: # sync mode in verl
+            self.instance_id = f"rank_{self.vllm_config.parallel_config.rank // self.vllm_config.parallel_config.world_size}"
+        self.routed_experts_reader.attach_buffer(max_num_kv_tokens=self.max_num_kv_tokens, model_config=self.vllm_config.model_config, instance_id=self.instance_id)
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -927,7 +939,31 @@ class Scheduler(SchedulerInterface):
                 stopped = check_stop(request, self.max_model_len,
                                      pooler_output)
 
+            routed_experts = None
             if stopped:
+                if self.vllm_config.model_config.enable_return_routed_experts:
+                    assert len(self.kv_cache_config.kv_cache_groups) == 1
+
+                    kv_blocks = self.kv_cache_manager.get_blocks(request.request_id)  
+                    block_ids = kv_blocks.get_block_ids()[0] 
+                    num_tokens = request.num_tokens-1
+                    
+                    # 计算slot mapping  
+                    block_ids_array = np.array(block_ids, dtype=np.int32)  
+                    num_blocks = len(block_ids)  
+                    block_size = self.block_size  
+                    
+                    # 生成block内偏移  
+                    block_offsets = np.arange(0, block_size)  
+                    
+                    # 计算slot mapping: slot = block_id * block_size + offset  
+                    slot_mapping = (  
+                        block_offsets.reshape((1, block_size))  
+                        + block_ids_array.reshape((num_blocks, 1)) * block_size  
+                    ).flatten()[:num_tokens]  
+                    
+                    routed_experts = self.routed_experts_reader.get_routed_experts(slot_mapping)                    
+
                 kv_transfer_params = self._free_request(request)
                 if status_before_stop == RequestStatus.RUNNING:
                     stopped_running_reqs.add(request)
@@ -971,6 +1007,7 @@ class Scheduler(SchedulerInterface):
                         kv_transfer_params=kv_transfer_params,
                         trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
+                        routed_experts=routed_experts,
                     ))
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.

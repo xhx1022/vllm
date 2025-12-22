@@ -37,6 +37,9 @@ from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 from vllm.utils import (cdiv, direct_register_custom_op, has_deep_ep, has_pplx,
                         round_up)
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsCapturer
+)
 
 if current_platform.is_cuda_alike():
     from .fused_batched_moe import BatchedTritonExperts
@@ -64,6 +67,7 @@ if current_platform.is_tpu():
 else:
     fused_moe_pallas = None  # type: ignore
 
+from vllm.distributed import get_tensor_model_parallel_rank  
 logger = init_logger(__name__)
 
 
@@ -483,6 +487,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             logical_to_physical_map=logical_to_physical_map,
             logical_replica_count=logical_replica_count)
 
+        if RoutedExpertsCapturer.get_instance() is not None:
+            RoutedExpertsCapturer.get_instance().capture(
+                layer_id=layer.get_layer_id,
+                topk_ids=topk_ids,
+            )
+
         if self.rocm_aiter_moe_enabled:
             return self.rocm_aiter_fused_experts(
                 hidden_states=x,
@@ -831,6 +841,8 @@ class FusedMoE(CustomOp):
             raise ValueError("Duplicate layer name: {}".format(prefix))
         compilation_config.static_forward_context[prefix] = self
         self.layer_name = prefix
+        from vllm.model_executor.models.utils import extract_layer_index
+        self.layer_id = extract_layer_index(self.layer_name)
 
         self.enable_eplb = enable_eplb
         self.expert_load_view: Optional[torch.Tensor] = None
@@ -964,6 +976,10 @@ class FusedMoE(CustomOp):
     @property
     def shared_experts(self) -> Optional[torch.nn.Module]:
         return None
+
+    @property
+    def get_layer_id(self):
+        return self.layer_id
 
     @property
     def tp_size(self):

@@ -42,6 +42,9 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsCapturer
+)
 
 logger = init_logger(__name__)
 
@@ -380,6 +383,12 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype,
         )
+
+        if RoutedExpertsCapturer.get_instance() is not None:
+            RoutedExpertsCapturer.get_instance().capture(
+                layer_id=layer.get_layer_id,
+                topk_ids=topk_ids,
+            )
 
         if self.use_marlin:
             return torch.ops.vllm.fused_marlin_moe(
@@ -840,6 +849,12 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             indices_type=self.topk_indices_dtype,
         )
 
+        if RoutedExpertsCapturer.get_instance() is not None:
+            RoutedExpertsCapturer.get_instance().capture(
+                layer_id=layer.get_layer_id,
+                topk_ids=topk_ids,
+            )
+
         # cutlass path
         if self.use_cutlass:
             per_act_token = (
@@ -1092,6 +1107,12 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype)
+
+        if RoutedExpertsCapturer.get_instance() is not None:
+            RoutedExpertsCapturer.get_instance().capture(
+                layer_id=layer.get_layer_id,
+                topk_ids=topk_ids,
+            )
 
         return fused_experts(
             hidden_states=x,
@@ -1400,6 +1421,12 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype)
 
+        if RoutedExpertsCapturer.get_instance() is not None:
+            RoutedExpertsCapturer.get_instance().capture(
+                layer_id=layer.get_layer_id,
+                topk_ids=topk_ids,
+            )
+
         return torch.ops.vllm.fused_marlin_moe(
             x,
             layer.w13_weight_packed,
@@ -1630,6 +1657,12 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype)
+
+        if RoutedExpertsCapturer.get_instance() is not None:
+            RoutedExpertsCapturer.get_instance().capture(
+                layer_id=layer.get_layer_id,
+                topk_ids=topk_ids,
+            )
 
         return fused_experts(
             x,

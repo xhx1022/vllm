@@ -16,6 +16,9 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d, normalize_e4m3fn_to_e4m3fnuz, per_tensor_dequantize)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsCapturer
+)
 
 logger = init_logger(__name__)
 
@@ -249,6 +252,12 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype)
 
+        if RoutedExpertsCapturer.get_instance() is not None:
+            RoutedExpertsCapturer.get_instance().capture(
+                layer_id=layer.get_layer_id,
+                topk_ids=topk_ids,
+            )
+
         return fused_experts(
             x,
             layer.w13_weight,
@@ -412,6 +421,12 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype)
+
+        if RoutedExpertsCapturer.get_instance() is not None:
+            RoutedExpertsCapturer.get_instance().capture(
+                layer_id=layer.get_layer_id,
+                topk_ids=topk_ids,
+            )
 
         out = fused_experts(
             x,

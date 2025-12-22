@@ -17,7 +17,9 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_marlin_supports_layer)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsCapturer
+)
 
 class MoeWNA16Config(QuantizationConfig):
     """Config class for MOE WNA16 (W8A16/W4A16) quantization."""
@@ -326,6 +328,12 @@ class MoeWNA16Method(FusedMoEMethodBase):
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype)
+
+        if RoutedExpertsCapturer.get_instance() is not None:
+            RoutedExpertsCapturer.get_instance().capture(
+                layer_id=layer.get_layer_id,
+                topk_ids=topk_ids,
+            )
 
         weight_bits = self.quant_config.weight_bits
         has_zp = self.quant_config.has_zp

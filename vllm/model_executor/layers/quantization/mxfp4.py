@@ -700,6 +700,12 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             logical_to_physical_map=logical_to_physical_map,
             logical_replica_count=logical_replica_count)
 
+        if RoutedExpertsCapturer.get_instance() is not None:
+            RoutedExpertsCapturer.get_instance().capture(
+                layer_id=layer.get_layer_id,
+                topk_ids=topk_ids,
+            )
+
         return self.fused_experts(
             hidden_states=x,
             w1=layer.w13_weight,
@@ -755,6 +761,12 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 scoring_func=scoring_func,
                 routed_scaling_factor=routed_scaling_factor,
                 e_score_correction_bias=e_score_correction_bias)
+
+            if RoutedExpertsCapturer.get_instance() is not None:
+                RoutedExpertsCapturer.get_instance().capture(
+                    layer_id=layer.get_layer_id,
+                    topk_ids=topk_ids,
+                )
 
             return torch.ops.vllm.fused_marlin_moe(
                 x,
@@ -866,6 +878,12 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 scoring_func=scoring_func,
                 e_score_correction_bias=e_score_correction_bias,
             )
+
+            if RoutedExpertsCapturer.get_instance() is not None:
+                RoutedExpertsCapturer.get_instance().capture(
+                    layer_id=layer.get_layer_id,
+                    topk_ids=topk_ids,
+                )
 
             # Backend-specific preparation
             if self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS:

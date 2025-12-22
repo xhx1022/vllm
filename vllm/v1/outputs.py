@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import NamedTuple, Optional
 
 import torch
-
+import numpy as np
 
 class LogprobsLists(NamedTuple):
 

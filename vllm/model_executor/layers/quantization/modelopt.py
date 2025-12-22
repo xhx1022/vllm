@@ -44,6 +44,9 @@ from vllm.scalar_type import scalar_types
 from vllm.utils import next_power_of_2
 from vllm.utils.flashinfer import (flashinfer_scaled_fp4_mm, has_flashinfer,
                                    has_flashinfer_moe)
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsCapturer
+)
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -537,6 +540,11 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             indices_type=self.topk_indices_dtype,
         )
 
+        if RoutedExpertsCapturer.get_instance() is not None:
+            RoutedExpertsCapturer.get_instance().capture(
+                layer_id=layer.get_layer_id,
+                topk_ids=topk_ids,
+            )
         if self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
             assert not renormalize
             assert activation == 'silu', (
@@ -1456,6 +1464,12 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype)
+
+        if RoutedExpertsCapturer.get_instance() is not None:
+            RoutedExpertsCapturer.get_instance().capture(
+                layer_id=layer.get_layer_id,
+                topk_ids=topk_ids,
+            )
 
         if self.use_marlin:
             return torch.ops.vllm.fused_marlin_moe(

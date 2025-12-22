@@ -52,6 +52,7 @@ class Request:
         self.arrival_time = arrival_time if arrival_time is not None else \
             time.time()
 
+        self.output_routed_experts = []
         self.status = RequestStatus.WAITING
         self.use_structured_output = False
         self.events: list[EngineCoreEvent] = []
@@ -85,6 +86,7 @@ class Request:
         self.num_output_placeholders = 0  # Used in async scheduling.
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
+        self.slot_mapping: list[int] = []
         self.cache_salt: Optional[str] = cache_salt
 
         # Multi-modal related

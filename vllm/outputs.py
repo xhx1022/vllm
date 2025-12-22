@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Generic, Optional, Union
 
 import torch
+import numpy as np
 from typing_extensions import TypeVar
 
 from vllm.logger import init_logger
@@ -43,6 +44,7 @@ class CompletionOutput:
     index: int
     text: str
     token_ids: GenericSequence[int]
+    routed_experts: Optional[np.ndarray] # [seq_len,layer_num,topk]
     cumulative_logprob: Optional[float]
     logprobs: Optional[SampleLogprobs]
     finish_reason: Optional[str] = None
@@ -56,6 +58,7 @@ class CompletionOutput:
         return (f"CompletionOutput(index={self.index}, "
                 f"text={self.text!r}, "
                 f"token_ids={self.token_ids}, "
+                f"routed_experts={self.routed_experts}, "
                 f"cumulative_logprob={self.cumulative_logprob}, "
                 f"logprobs={self.logprobs}, "
                 f"finish_reason={self.finish_reason}, "
@@ -91,6 +94,7 @@ class RequestOutput:
                           For encoder/decoder models, this is the
                           decoder input prompt token ids.
         prompt_logprobs: The log probabilities to return per prompt token.
+        routed_expert_ids: The routed expert ids for the request.
         outputs: The output sequences of the request.
         finished: Whether the whole request is finished.
         metrics: Metrics associated with the request.

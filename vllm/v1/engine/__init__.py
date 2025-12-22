@@ -8,7 +8,7 @@ from typing import Any, Optional, Union
 
 import msgspec
 import torch
-
+import numpy as np
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
@@ -117,6 +117,7 @@ class EngineCoreOutput(
     trace_headers: Optional[Mapping[str, str]] = None
     # The number of tokens with prefix cache hits.
     num_cached_tokens: int = 0
+    routed_experts: Optional[np.ndarray] = None
 
     @property
     def finished(self) -> bool:
