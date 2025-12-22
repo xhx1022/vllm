@@ -77,6 +77,7 @@ class Worker(LocalOrDistributedWorkerBase):
                         "eagle",
                         "deepseek_mtp",
                         "glm4_moe_mtp",
+                        "qwen3_moe_mtp",
                         "mimo_mtp",
                         "ernie_mtp",
                         "qwen3_next_mtp")) \

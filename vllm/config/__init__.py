@@ -1511,6 +1511,7 @@ class ModelConfig:
         if (self.hf_text_config.model_type == "deepseek_mtp"
                 or self.hf_config.model_type == "mimo_mtp"
                 or self.hf_config.model_type == "glm4_moe_mtp"
+                or self.hf_config.model_type == "qwen3_moe_mtp"
                 or self.hf_config.model_type == "ernie_mtp"
                 or self.hf_config.model_type == "qwen3_next_mtp"):
             total_num_hidden_layers = getattr(self.hf_text_config,
@@ -1998,6 +1999,15 @@ class SpeculativeConfig:
                 "architectures": ["DeepSeekMTPModel"]
             })
 
+        if hf_config.architectures[0] == "Qwen3MoeForCausalLM":
+            hf_config.model_type = "qwen3_moe_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update({
+                "num_hidden_layers": 0,
+                "n_predict": n_predict,
+                "architectures": ["Qwen3MoEMTPModel"]
+            })
+                 
         if hf_config.architectures[0] == "MiMoForCausalLM":
             hf_config.model_type = "mimo_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
@@ -2053,7 +2063,7 @@ class SpeculativeConfig:
                 (self.target_model_config.hf_text_config.model_type \
                         == "deepseek_v3" or
                     self.target_model_config.hf_text_config.model_type in
-                        ("mimo","ernie4_5_moe", "qwen3_next")):
+                        ("mimo","ernie4_5_moe", "qwen3_next", "qwen3_moe")):
                 # use the draft model from the same model:
                 self.model = self.target_model_config.model
                 # Align the quantization of draft model for cases such as
@@ -2152,7 +2162,7 @@ class SpeculativeConfig:
                       "mlp_speculator"):
                     self.method = "mlp_speculator"
                 elif (self.draft_model_config.hf_config.model_type
-                      in ("deepseek_mtp", "mimo_mtp", "glm4_moe_mtp")):
+                      in ("deepseek_mtp", "mimo_mtp", "glm4_moe_mtp", "qwen3_moe_mtp")):
                     self.method = "deepseek_mtp"
                     if self.num_speculative_tokens > 1:
                         logger.warning(
