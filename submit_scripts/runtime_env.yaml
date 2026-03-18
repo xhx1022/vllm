@@ -1,0 +1,29 @@
+working_dir: ./
+excludes:
+  - "/.git/"
+  - ".ruff_cache/"
+  - ".claude/"
+  - ".mypy_cache/"
+  - "__pycache__/"
+  - "*.egg-info/"
+  - ".venv/"
+  - "docs/"
+  - "docker/"
+worker_process_setup_hook: "submit_scripts.entrypoint.setup"
+env_vars:
+  TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
+  CUDA_DEVICE_MAX_CONNECTIONS: "1"
+  NCCL_PRIMS_PROFILE_ENABLE: "0"
+  NCCL_CUMEM_ENABLE: "1"
+  NCCL_AMEM_PLUGIN: "/usr/local/tccl/lib/plugin/libamem_nccl.so"
+  AMEM_ENABLE: "1"
+  GMM_LOG: "0"
+  AMEM_NCCL_OFFLOAD_FREE_TAG: "7"
+  AMEM_RESUME_PIPELINE: "1"
+  AMEM_RESUME_ALLOC_THREADS: "2"
+  AMEM_WORKER_UPDATE_THREADS: "2"
+  # 禁用 Ray 日志折叠（设置为 0 表示不限制日志长度）
+  # RAY_LOG_MAX_LENGTH: "0"
+  # RAY_DEDUP_LOGS: "0"
+  # # 设置 Python logging 不截断日志消息
+  # PYTHONUNBUFFERED: "1"
