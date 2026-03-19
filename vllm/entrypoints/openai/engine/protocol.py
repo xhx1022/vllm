@@ -107,6 +107,15 @@ class UsageInfo(OpenAIBaseModel):
     total_tokens: int = 0
     completion_tokens: int | None = 0
     prompt_tokens_details: PromptTokenUsageInfo | None = None
+    # Per-request timing breakdown (seconds, monotonic intervals).
+    # queue_time_s:      time waiting in vLLM scheduler queue.
+    # prefill_compute_s: GPU prefill time (first scheduled -> first token).
+    # decode_time_s:     GPU decode time (first token -> last token).
+    # inference_time_s:  prefill + decode (first scheduled -> last token).
+    queue_time_s: float | None = None
+    prefill_compute_s: float | None = None
+    decode_time_s: float | None = None
+    inference_time_s: float | None = None
 
 
 class RequestResponseMetadata(BaseModel):

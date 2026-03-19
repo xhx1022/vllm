@@ -519,6 +519,7 @@ class OpenAIServingChat(OpenAIServing):
         finish_reason_sent = [False] * num_choices
         num_prompt_tokens = 0
         num_cached_tokens = None
+        last_metrics = None  # RequestStateStats from the final output
         if self.use_harmony:
             harmony_parsers = [
                 get_streamable_parser_for_assistant() for _ in range(num_choices)
@@ -586,6 +587,8 @@ class OpenAIServingChat(OpenAIServing):
 
         try:
             async for res in result_generator:
+                if res.metrics is not None:
+                    last_metrics = res.metrics
                 if res.prompt_token_ids is not None:
                     num_prompt_tokens = len(res.prompt_token_ids)
                     if res.encoder_prompt_token_ids is not None:
@@ -1218,6 +1221,18 @@ class OpenAIServingChat(OpenAIServing):
                     final_usage.prompt_tokens_details = PromptTokenUsageInfo(
                         cached_tokens=num_cached_tokens
                     )
+                final_usage.queue_time_s = (
+                    last_metrics.scheduled_ts - last_metrics.queued_ts
+                )
+                final_usage.prefill_compute_s = (
+                    last_metrics.first_token_ts - last_metrics.scheduled_ts
+                )
+                final_usage.decode_time_s = (
+                    last_metrics.last_token_ts - last_metrics.first_token_ts
+                )
+                final_usage.inference_time_s = (
+                    last_metrics.last_token_ts - last_metrics.scheduled_ts
+                )
 
                 final_usage_chunk = ChatCompletionStreamResponse(
                     id=request_id,
