@@ -24,7 +24,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+from vllm.model_executor.layers.fused_moe.routed_experts_capture import (
     RoutedExpertsManager,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -315,9 +315,16 @@ class Scheduler(SchedulerInterface):
         )
 
         if self.enable_return_routed_experts:
+            # Context parallelism is unsupported: under DCP/PCP the attention
+            # slot space is interleaved across CP ranks, so the physical slot
+            # ``block*block_size + compacted_offset`` aliases distinct virtual
+            # tokens (owned by different ranks) onto the same slot. The
+            # rank-local routing slot buffer therefore cannot hold per-token
+            # routing; supporting CP needs a global-token-index addressing
+            # redesign (tracked separately).
             assert self.dcp_world_size == 1 and self.pcp_world_size == 1, (
-                "enable_return_routed_experts does not support context parallelism "
-                "(dcp_world_size > 1 or pcp_world_size > 1)"
+                "enable_return_routed_experts does not support context "
+                "parallelism (dcp_world_size > 1 or pcp_world_size > 1)"
             )
 
             self.routed_experts_mgr = RoutedExpertsManager(
@@ -1535,22 +1542,19 @@ class Scheduler(SchedulerInterface):
                 num_scheduled_tokens,
             )
 
-        # Persist per-step routed experts into the scheduler-side slot
-        # buffer (CPU->CPU fancy-index assign; ~few MB per step).
-        # MUST precede the per-request routing reads below: stopped
-        # requests may terminate on tokens generated in this very step,
-        # whose routing was just D2H'd into model_runner_output.
-        routing_data = None
+        # Per-step routing slot indices returned by the worker (output_rank).
+        # The worker scattered this step's routing into the shared slot buffer
+        # and returns only the slot index of each scheduled token (NOT the
+        # routing payload). These slots ride this step's ModelRunnerOutput, so
+        # they are correctly paired with the step under async scheduling (a
+        # scheduler-side snapshot keyed by req_id would be clobbered by the next
+        # pipelined schedule). Decode reads its tokens' routing from the shared
+        # buffer using these slots; the per-request offset map is in the model
+        # runner's request order (input_batch ordering), not scheduler dict order.
+        routing_slots = None
         routing_offsets: dict[str, int] = {}
-        if model_runner_output.routed_experts is not None:
-            re = model_runner_output.routed_experts
-            self.routed_experts_mgr.store_batch(re.routing_data, re.slot_mapping)
-            routing_data = re.routing_data.astype(
-                self.routed_experts_mgr.routed_experts_by_slot.dtype,
-                copy=False,
-            )
-            # Build offset map using model runner's request order
-            # (input_batch ordering), NOT scheduler dict order.
+        if model_runner_output.routed_experts_slots is not None:
+            routing_slots = model_runner_output.routed_experts_slots
             offset = 0
             for rid in model_runner_output.req_ids:
                 routing_offsets[rid] = offset
@@ -1662,16 +1666,17 @@ class Scheduler(SchedulerInterface):
             routed_experts = None
             if (
                 self.enable_return_routed_experts
-                and routing_data is not None
+                and routing_slots is not None
                 and new_token_ids
             ):
                 req_offset = routing_offsets[req_id]
-                end = req_offset + num_tokens_scheduled
-                block_ids = self._re_block_ids.pop(req_id, [])
+                end = req_offset + num_scheduled_tokens[req_id]
                 if num_output_tokens_before == 0:
-                    # Prefill completed: read full prompt routing from
-                    # slot buffer using the block-ID snapshot taken at
-                    # schedule time (immune to async preemption).
+                    # Prefill completed: read full prompt routing from the shared
+                    # slot buffer using the block-ID snapshot taken at schedule
+                    # time (a sequence-prefix, so it survives async preemption /
+                    # later schedules).
+                    block_ids = self._re_block_ids.get(req_id, [])
                     if (
                         request.sampling_params is not None
                         and request.sampling_params.routed_experts_prompt_start
@@ -1680,7 +1685,12 @@ class Scheduler(SchedulerInterface):
                         prompt_start = (
                             request.sampling_params.routed_experts_prompt_start
                         )
-                        assert prompt_start < request.num_prompt_tokens
+                        if prompt_start >= request.num_prompt_tokens:
+                            raise ValueError(
+                                "routed_experts_prompt_start "
+                                f"({prompt_start}) must be < num_prompt_tokens "
+                                f"({request.num_prompt_tokens})"
+                            )
                     else:
                         prompt_start = 0
                     routed_experts = self.routed_experts_mgr.get(
@@ -1689,15 +1699,17 @@ class Scheduler(SchedulerInterface):
                         token_start=prompt_start,
                     )
                 else:
+                    # Decode: read this step's generated tokens' routing from the
+                    # shared slot buffer using the slots the worker returned for
+                    # this step (step-paired, so async-correct). Normal decode
+                    # returns the last n scheduled slots; spec decode's accepted
+                    # tokens are at the start of the range.
+                    n = len(new_token_ids)
                     if scheduled_spec_token_ids:
-                        # Spec decode: accepted tokens at the START of
-                        # the scheduled range, rejected at the end.
-                        routed_experts = routing_data[
-                            req_offset : req_offset + len(new_token_ids)
-                        ]
+                        slots = routing_slots[req_offset : req_offset + n]
                     else:
-                        # Normal decode / re-prefill: token(s) at the END.
-                        routed_experts = routing_data[end - len(new_token_ids) : end]
+                        slots = routing_slots[end - n : end]
+                    routed_experts = self.routed_experts_mgr.get_by_slots(slots)
 
             finish_reason = None
             if stopped:
@@ -2100,6 +2112,10 @@ class Scheduler(SchedulerInterface):
         assert request.is_finished()
 
         self._inflight_prefills.discard(request)
+        if self.enable_return_routed_experts:
+            # Drop the routed-experts block-ID snapshot for this request
+            # (read non-destructively during the request's lifetime).
+            self._re_block_ids.pop(request.request_id, None)
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
         self.encoder_cache_manager.free(request)
         request_id = request.request_id
@@ -2337,6 +2353,10 @@ class Scheduler(SchedulerInterface):
 
         if self.ec_connector is not None:
             self.ec_connector.shutdown()
+
+        # Release the shared routing slot mmap (creator unlinks /dev/shm file).
+        if getattr(self, "routed_experts_mgr", None) is not None:
+            self.routed_experts_mgr.shutdown()
 
         logger.debug_once("[shutdown] Scheduler: complete")
 
