@@ -18,16 +18,20 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capture.common import (
     routing_slot_shape_dtype,
 )
 from vllm.model_executor.layers.fused_moe.routed_experts_capture.manager import (
+    FullAttnBlockMap,
     RoutedExpertsManager,
+    compute_full_attn_block_map,
 )
 from vllm.model_executor.layers.fused_moe.routed_experts_capture.shared_region import (
     RoutedExpertsWorkerWriter,
 )
 
 __all__ = [
+    "FullAttnBlockMap",
     "RoutedExpertsCapturer",
     "RoutedExpertsManager",
     "RoutedExpertsWorkerWriter",
+    "compute_full_attn_block_map",
     "get_num_experts",
     "get_num_experts_per_tok",
     "require_full_attention_gid",
