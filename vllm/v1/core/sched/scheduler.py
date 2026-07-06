@@ -25,6 +25,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadat
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.routed_experts_capture import (
+    RoutedExpertsBlockLifecycleObserver,
     RoutedExpertsManager,
     require_full_attention_gid,
 )
@@ -344,6 +345,10 @@ class Scheduler(SchedulerInterface):
                 num_offload_blocks=num_offload_blocks,
                 block_size_factor=block_size_factor,
             )
+            # For disk / multi-tier offload, register the observer that makes
+            # routing follow the KV blocks' CPU<->secondary cascade/promotion.
+            if num_offload_blocks is not None:
+                self._maybe_register_routed_experts_secondary_store(vllm_config)
             # Block-ID snapshot taken at schedule time (before forward),
             # so update_from_output can read slot data even if a later
             # schedule() frees the blocks (async scheduling race).
@@ -398,6 +403,78 @@ class Scheduler(SchedulerInterface):
                 "kv_offloading_size / cpu_bytes_to_use."
             )
         return cs.spec.num_blocks, cs.config.block_size_factor
+
+    def _maybe_register_routed_experts_secondary_store(
+        self, vllm_config: VllmConfig
+    ) -> None:
+        """Attach a routing-sidecar observer when the offload manager tiers.
+
+        For a ``TieringOffloadingManager``, build a store for the first
+        secondary tier whose ``type`` has a ``RoutedExpertsStoreFactory``
+        builder and install a ``RoutedExpertsBlockLifecycleObserver``, so
+        routing cascades / promotes in lockstep with the KV blocks. A tier
+        type with no registered builder is skipped with a warning (KV still
+        tiers). Single-tier CPU offload installs nothing (no callbacks fire).
+        """
+        from vllm.model_executor.layers.fused_moe.routed_experts_capture import (
+            RoutedExpertsStoreContext,
+            RoutedExpertsStoreFactory,
+        )
+        from vllm.v1.kv_offload.tiering.manager import TieringOffloadingManager
+
+        assert self.connector is not None
+        cs = self.connector.connector_scheduler
+        assert cs is not None
+        manager = cs.manager
+        if not isinstance(manager, TieringOffloadingManager):
+            return
+
+        spec = cs.spec
+        mgr = self.routed_experts_mgr
+        row_shape = (
+            mgr.block_size_factor,
+            mgr.block_size,
+            mgr.num_layers,
+            mgr.num_experts_per_tok,
+        )
+        tier_configs = [
+            t
+            for t in (spec.extra_config.get("secondary_tiers") or [])
+            if isinstance(t, dict)
+        ]
+
+        store = None
+        for tier_config in tier_configs:
+            tier_type = tier_config.get("type")
+            if not tier_type:
+                continue
+            ctx = RoutedExpertsStoreContext(
+                tier_config=tier_config,
+                offloading_spec=spec,
+                row_shape=row_shape,
+                dtype=mgr.expert_id_dtype,
+            )
+            store = RoutedExpertsStoreFactory.create(tier_type, ctx)
+            if store is not None:
+                logger.info(
+                    "Registered routed-experts sidecar via '%s' tier (row_shape=%s)",
+                    tier_type,
+                    row_shape,
+                )
+                break
+
+        if store is None:
+            logger.warning(
+                "KV offload tiers to secondary storage but no routed-experts "
+                "store backend is registered for any configured tier type "
+                "(%s); routing will NOT survive CPU eviction. Register a "
+                "RoutedExpertsStoreFactory builder for your tier type.",
+                [t.get("type") for t in tier_configs],
+            )
+            return
+
+        observer = RoutedExpertsBlockLifecycleObserver(mgr, store)
+        manager.set_block_lifecycle_observer(observer)
 
     def _mamba_block_aligned_split(
         self,

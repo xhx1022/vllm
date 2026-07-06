@@ -25,12 +25,26 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capture.manager import 
 from vllm.model_executor.layers.fused_moe.routed_experts_capture.shared_region import (
     RoutedExpertsWorkerWriter,
 )
+from vllm.model_executor.layers.fused_moe.routed_experts_capture.store import (
+    FileRoutedExpertsStore,
+    RoutedExpertsBlockLifecycleObserver,
+    RoutedExpertsSecondaryStore,
+    RoutedExpertsStoreContext,
+    RoutedExpertsStoreFactory,
+    build_fs_routed_experts_store,
+)
 
 __all__ = [
+    "FileRoutedExpertsStore",
     "FullAttnBlockMap",
+    "RoutedExpertsBlockLifecycleObserver",
     "RoutedExpertsCapturer",
     "RoutedExpertsManager",
+    "RoutedExpertsSecondaryStore",
+    "RoutedExpertsStoreContext",
+    "RoutedExpertsStoreFactory",
     "RoutedExpertsWorkerWriter",
+    "build_fs_routed_experts_store",
     "compute_full_attn_block_map",
     "get_num_experts",
     "get_num_experts_per_tok",
