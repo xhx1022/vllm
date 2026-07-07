@@ -345,6 +345,8 @@ class Scheduler(SchedulerInterface):
                 num_offload_blocks=num_offload_blocks,
                 block_size_factor=block_size_factor,
             )
+            if num_offload_blocks is not None:
+                self._maybe_register_routed_experts_offload_buffer()
             # Snapshot block IDs before forward because async scheduling may
             # release or reassign them before model output is processed.
             self._routed_experts_block_ids: dict[str, list[int]] = {}
@@ -399,6 +401,34 @@ class Scheduler(SchedulerInterface):
         return (
             connector_scheduler.spec.num_blocks,
             connector_scheduler.config.block_size_factor,
+        )
+
+    def _maybe_register_routed_experts_offload_buffer(self) -> None:
+        """Register the routing offload buffer as a KV-tier sidecar buffer.
+
+        With a TieringOffloadingManager, secondary tiers cascade / promote
+        routing rows together with their KV blocks; a tier that cannot
+        transfer sidecar buffers fails fast in register_secondary_sidecar_buffer.
+        Single-tier CPU offload registers nothing. Must run before any request
+        is scheduled.
+        """
+        from vllm.v1.kv_offload.tiering.base import TierBlockBuffer
+        from vllm.v1.kv_offload.tiering.manager import TieringOffloadingManager
+
+        assert self.connector is not None, "KV connector is required for offload"
+        connector_scheduler = self.connector.connector_scheduler
+        assert connector_scheduler is not None, (
+            "OffloadingConnector must provide a connector scheduler"
+        )
+        manager = connector_scheduler.manager
+        if not isinstance(manager, TieringOffloadingManager):
+            return
+
+        view, bytes_per_block = (
+            self.routed_experts_manager.get_offload_buffer_descriptor()
+        )
+        manager.register_secondary_sidecar_buffer(
+            TierBlockBuffer(view, bytes_per_block, "routing")
         )
 
     def _mamba_block_aligned_split(

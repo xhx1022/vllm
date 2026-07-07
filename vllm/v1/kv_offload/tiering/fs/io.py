@@ -34,9 +34,17 @@ def store_block(
     buffer: memoryview,
     offset: int,
     block_size: int,
+    use_direct_io: bool = True,
 ) -> None:
-    """
-    Store callback: Writes to a temp file then atomically replaces the destination.
+    """Store one block through a temporary file and atomic replacement.
+
+    Args:
+        dest_path: Destination file path.
+        buffer: Buffer containing the source block.
+        offset: Byte offset of the block in the buffer.
+        block_size: Number of bytes to write.
+        use_direct_io: Whether to use O_DIRECT. Unaligned sidecar buffers must
+            use buffered I/O.
     """
     # Check if block already exists to avoid redundant writes
     if os.path.exists(dest_path):
@@ -52,7 +60,11 @@ def store_block(
     try:
         fd = os.open(
             tmp_path,
-            os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_TRUNC | O_DIRECT,
+            os.O_CREAT
+            | os.O_EXCL
+            | os.O_WRONLY
+            | os.O_TRUNC
+            | (O_DIRECT if use_direct_io else 0),
             0o644,
         )
         try:
@@ -77,14 +89,22 @@ def load_block(
     view: memoryview,
     offset: int,
     block_size: int,
+    use_direct_io: bool = True,
 ) -> None:
-    """
-    Load callback: read one KV block from disk. Remove the file on failure.
+    """Load one block from disk and remove an unreadable source file.
+
+    Args:
+        source_path: Source file path.
+        view: Destination buffer.
+        offset: Byte offset of the block in the destination buffer.
+        block_size: Number of bytes to read.
+        use_direct_io: Whether to use O_DIRECT. Unaligned sidecar buffers must
+            use buffered I/O.
     """
     fd: int | None = None
     view_slice = view.cast("B")[offset : offset + block_size]
     try:
-        fd = os.open(source_path, os.O_RDONLY | O_DIRECT)
+        fd = os.open(source_path, os.O_RDONLY | (O_DIRECT if use_direct_io else 0))
         bytes_read = os.readv(fd, [view_slice])
         if bytes_read < block_size:
             raise OSError(f"Short read: expected {block_size} bytes, read {bytes_read}")

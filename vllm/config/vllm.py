@@ -886,14 +886,14 @@ class VllmConfig:
         uses_supported_cpu_offload = (
             kv_transfer_config.kv_connector == "OffloadingConnector"
             and kv_transfer_config.kv_role == "kv_both"
-            and offloading_spec_name == "CPUOffloadingSpec"
+            and offloading_spec_name in ("CPUOffloadingSpec", "TieringOffloadingSpec")
         )
         if not uses_supported_cpu_offload:
             raise ValueError(
                 "--enable-return-routed-experts only supports the CPU KV "
-                "offload connector (OffloadingConnector + CPUOffloadingSpec) "
-                "with kv_role=kv_both; PD disaggregation and other KV "
-                "connectors are not supported."
+                "offload connector (OffloadingConnector + CPUOffloadingSpec "
+                "or its TieringOffloadingSpec subclass) with kv_role=kv_both; "
+                "PD disaggregation and other KV connectors are not supported."
             )
 
     def _verify_kv_transfer_compat(self) -> None:

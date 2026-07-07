@@ -27,7 +27,7 @@ from vllm.v1.kv_offload.base import (
     ScheduleEndContext,
     make_offload_key,
 )
-from vllm.v1.kv_offload.tiering.base import JobMetadata
+from vllm.v1.kv_offload.tiering.base import JobMetadata, TierBlockBuffer
 from vllm.v1.kv_offload.tiering.fs.manager import (
     FileSystemTierManager,
 )
@@ -592,3 +592,96 @@ def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
         assert not fs_events[0].removed
     finally:
         tier.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Sidecar buffers
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fs_tier_with_sidecar(tmp_path):
+    tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
+    tier = FileSystemTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=memoryview(tensor.numpy()),
+        tier_type="fs",
+        root_dir=str(tmp_path),
+        n_read_threads=4,
+        n_write_threads=4,
+    )
+    # Routing-like sidecar: per-block size deliberately not 512-aligned.
+    sidecar = np.zeros((4, 100), dtype=np.uint8)
+    tier.attach_primary_buffer(
+        TierBlockBuffer(memoryview(sidecar), sidecar.strides[0], "routing")
+    )
+    yield tier, tensor, sidecar
+    tier.shutdown()
+
+
+def test_sidecar_store_load_roundtrip(fs_tier_with_sidecar):
+    """Sidecar rows ride the same store/load jobs as their KV blocks."""
+    tier, _, sidecar = fs_tier_with_sidecar
+    sidecar[:2] = np.arange(200, dtype=np.uint8).reshape(2, 100)
+    expected = sidecar[:2].copy()
+
+    keys = [key(1), key(2)]
+    tier.submit_store(make_job(1, keys, [0, 1]))
+    assert all(r.success for r in drain(tier))
+    for offload_key in keys:
+        base_path = tier.file_mapper.get_file_name(offload_key)
+        assert os.path.exists(base_path)
+        assert os.path.exists(base_path + ".routing")
+
+    # Overwrite the source rows to prove the load reads from disk.
+    sidecar[:] = 0
+    tier.submit_load(make_job(2, keys, [2, 3], is_promotion=True))
+    assert all(r.success for r in drain(tier))
+    assert np.array_equal(sidecar[2:4], expected)
+
+
+@pytest.mark.parametrize("use_c_ext", [True, False])
+def test_sidecar_lookup_requires_all_files(
+    fs_tier_with_sidecar, monkeypatch, use_c_ext
+):
+    """The KV file alone is not a hit: its sidecar file must exist too."""
+    import vllm.v1.kv_offload.tiering.fs.manager as fs_manager
+
+    if use_c_ext and not fs_manager._HAS_BATCH_LOOKUP_C:
+        pytest.skip("fs_io_C extension not built")
+    monkeypatch.setattr(fs_manager, "_HAS_BATCH_LOOKUP_C", use_c_ext)
+
+    tier, _, _ = fs_tier_with_sidecar
+    tier.submit_store(make_job(1, [key(1)], [0]))
+    assert all(r.success for r in drain(tier))
+    assert lookup_and_wait(tier, [key(1)]) == [LookupResult.HIT]
+
+    os.remove(tier.file_mapper.get_file_name(key(1)) + ".routing")
+    # Drop the cached lookup state so the next lookup re-checks the disk.
+    tier.on_request_finished(_CTX)
+    assert lookup_and_wait(tier, [key(1)]) == [LookupResult.MISS]
+
+
+def test_store_task_count_matches_buffers(fs_tier, monkeypatch):
+    """One task per key per buffer; the KV-only path stays one per key."""
+    tier, _ = fs_tier
+    task_counts = []
+    original_enqueue_store = tier._pool.enqueue_store
+
+    def record_task_count(job_id, num_tasks, tasks):
+        task_counts.append(num_tasks)
+        return original_enqueue_store(job_id, num_tasks, tasks)
+
+    monkeypatch.setattr(tier._pool, "enqueue_store", record_task_count)
+
+    tier.submit_store(make_job(1, [key(1), key(2)], [0, 1]))
+    assert task_counts == [2]
+    assert all(r.success for r in drain(tier))
+
+    sidecar = np.zeros((4, 100), dtype=np.uint8)
+    tier.attach_primary_buffer(
+        TierBlockBuffer(memoryview(sidecar), sidecar.strides[0], "routing")
+    )
+    tier.submit_store(make_job(2, [key(3), key(4)], [2, 3]))
+    assert task_counts == [2, 4]
+    assert all(r.success for r in drain(tier))

@@ -310,6 +310,14 @@ class RoutedExpertsManager:
         if store_block_maps:
             self.store_to_offload_blocks(FullAttnBlockMap.concatenate(store_block_maps))
 
+    def get_offload_buffer_descriptor(self) -> tuple[memoryview, int]:
+        """Return the offload buffer view and bytes per block."""
+        offload_blocks = self._get_offload_blocks()
+        assert offload_blocks.flags["C_CONTIGUOUS"], (
+            "routed-experts offload buffer must be C-contiguous"
+        )
+        return memoryview(offload_blocks), offload_blocks.strides[0]
+
     def get(
         self,
         block_ids: list[int],

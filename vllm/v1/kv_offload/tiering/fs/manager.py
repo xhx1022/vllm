@@ -18,7 +18,8 @@ File naming:  <base_path>_r<rank>/<hhh>/<hh>_g<group_idx>/<hash_hex>.bin
 import functools
 import json
 import os
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
 try:
@@ -47,6 +48,7 @@ from vllm.v1.kv_offload.tiering.base import (
     RequestOffloadingContext,
     ScheduleEndContext,
     SecondaryTierManager,
+    TierBlockBuffer,
 )
 from vllm.v1.kv_offload.tiering.fs.io import load_block, store_block
 from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool
@@ -55,6 +57,14 @@ if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
 
 logger = init_logger(__name__)
+
+
+@dataclass(frozen=True)
+class _BufferTransferSpec:
+    view: memoryview
+    block_size: int
+    get_path: Callable[[OffloadKey], str]
+    use_direct_io: bool
 
 
 class FsAsyncLookupManager(AsyncLookupManager):
@@ -71,11 +81,30 @@ class FsAsyncLookupManager(AsyncLookupManager):
     def batch_lookup(
         self, keys: list[OffloadKey], req_context: ReqContext
     ) -> Iterable[bool]:
-        paths = [self._tier.file_mapper.get_file_name(k) for k in keys]
+        buffer_specs = self._tier._buffer_specs
+        if len(buffer_specs) == 1:
+            paths = [buffer_specs[0].get_path(key) for key in keys]
+            if _HAS_BATCH_LOOKUP_C:
+                # C extension: GIL released for the entire faccessat() batch.
+                return batch_lookup_C(paths)
+            return (os.path.exists(path) for path in paths)
+        # A block hits only if every sidecar file exists. Buffer-major lookup
+        # keeps each key's results num_keys positions apart.
+        num_keys = len(keys)
+        paths = [
+            buffer_spec.get_path(key) for buffer_spec in buffer_specs for key in keys
+        ]
         if _HAS_BATCH_LOOKUP_C:
-            # C extension: GIL released for the entire faccessat() batch.
-            return batch_lookup_C(paths)
-        return (os.path.exists(p) for p in paths)
+            path_exists = list(batch_lookup_C(paths))
+        else:
+            path_exists = [os.path.exists(path) for path in paths]
+        return (
+            all(
+                path_exists[key_index + buffer_index * num_keys]
+                for buffer_index in range(len(buffer_specs))
+            )
+            for key_index in range(num_keys)
+        )
 
 
 class FileSystemTierManager(SecondaryTierManager):
@@ -100,6 +129,7 @@ class FileSystemTierManager(SecondaryTierManager):
     """
 
     medium: ClassVar[str] = MEDIUM_FS
+    transfers_sidecar_buffers = True
 
     def __init__(
         self,
@@ -171,6 +201,26 @@ class FileSystemTierManager(SecondaryTierManager):
 
         self._lookup_manager = FsAsyncLookupManager(tier=self, tier_type=self.tier_type)
 
+        # KV keeps O_DIRECT and its original file names; sidecar blocks are
+        # not 512-byte aligned, so they use buffered I/O and a name suffix.
+        self._buffer_specs: list[_BufferTransferSpec] = [
+            _BufferTransferSpec(
+                primary_kv_view,
+                self._block_size,
+                self.file_mapper.get_file_name,
+                True,
+            )
+        ]
+
+    @override
+    def attach_primary_buffer(self, buffer: TierBlockBuffer) -> None:
+        def get_path(key: OffloadKey, suffix: str = f".{buffer.name}") -> str:
+            return self.file_mapper.get_file_name(key) + suffix
+
+        self._buffer_specs.append(
+            _BufferTransferSpec(buffer.view, buffer.block_size, get_path, False)
+        )
+
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
         return RequestOffloadingContext()
@@ -186,31 +236,39 @@ class FileSystemTierManager(SecondaryTierManager):
     def submit_store(self, job_metadata: JobMetadata) -> None:
         if self.events is not None:
             self._store_job_keys[job_metadata.job_id] = list(job_metadata.keys)
+        # One task per (buffer, block); all buffers share the job_id, so the
+        # job only completes once every buffer's blocks are on disk.
         tasks = (
             functools.partial(
                 store_block,
-                self.file_mapper.get_file_name(key),
-                self._primary_kv_view,
-                int(bid) * self._block_size,
-                self._block_size,
+                buffer_spec.get_path(key),
+                buffer_spec.view,
+                int(block_id) * buffer_spec.block_size,
+                buffer_spec.block_size,
+                buffer_spec.use_direct_io,
             )
-            for key, bid in zip(job_metadata.keys, job_metadata.block_ids)
+            for buffer_spec in self._buffer_specs
+            for key, block_id in zip(job_metadata.keys, job_metadata.block_ids)
         )
-        self._pool.enqueue_store(job_metadata.job_id, len(job_metadata.keys), tasks)
+        num_tasks = len(job_metadata.keys) * len(self._buffer_specs)
+        self._pool.enqueue_store(job_metadata.job_id, num_tasks, tasks)
 
     @override
     def submit_load(self, job_metadata: JobMetadata) -> None:
         tasks = (
             functools.partial(
                 load_block,
-                self.file_mapper.get_file_name(key),
-                self._primary_kv_view,
-                int(bid) * self._block_size,
-                self._block_size,
+                buffer_spec.get_path(key),
+                buffer_spec.view,
+                int(block_id) * buffer_spec.block_size,
+                buffer_spec.block_size,
+                buffer_spec.use_direct_io,
             )
-            for key, bid in zip(job_metadata.keys, job_metadata.block_ids)
+            for buffer_spec in self._buffer_specs
+            for key, block_id in zip(job_metadata.keys, job_metadata.block_ids)
         )
-        self._pool.enqueue_load(job_metadata.job_id, len(job_metadata.keys), tasks)
+        num_tasks = len(job_metadata.keys) * len(self._buffer_specs)
+        self._pool.enqueue_load(job_metadata.job_id, num_tasks, tasks)
 
     @override
     def get_finished_jobs(self) -> Iterable[JobResult]:

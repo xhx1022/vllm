@@ -50,6 +50,7 @@ from vllm.v1.kv_offload.tiering.base import (
     JobMetadata,
     ParentManager,
     SecondaryTierManager,
+    TierBlockBuffer,
 )
 
 logger = init_logger(__name__)
@@ -211,6 +212,24 @@ class TieringOffloadingManager(OffloadingManager):
             tier: _SecondaryTierFacingParent(self, tier)
             for tier in self.secondary_tiers
         }
+
+    def register_secondary_sidecar_buffer(self, buffer: TierBlockBuffer) -> None:
+        """Attach a per-block sidecar buffer to the secondary tiers.
+
+        Call before any transfer. A tier that can't transfer sidecar buffers
+        fails fast here, rather than silently serving stale rows after a later
+        promotion.
+        """
+        for tier in self.secondary_tiers:
+            if not tier.transfers_sidecar_buffers:
+                raise ValueError(
+                    f"Secondary tier '{tier.tier_type}' does not transfer "
+                    f"sidecar buffers, so '{buffer.name}' cannot follow the KV "
+                    "blocks through it. Only the 'fs' tier is supported with "
+                    "--enable-return-routed-experts; use it or disable the "
+                    "feature."
+                )
+            tier.attach_primary_buffer(buffer)
 
     def _next_job_id(self) -> JobId:
         """Generate a unique job ID for async transfer tracking."""

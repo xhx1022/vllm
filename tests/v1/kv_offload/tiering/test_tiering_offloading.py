@@ -35,6 +35,7 @@ from vllm.v1.kv_offload.tiering.base import (
     JobMetadata,
     JobResult,
     SecondaryTierManager,
+    TierBlockBuffer,
 )
 from vllm.v1.kv_offload.tiering.example.manager import ExampleSecondaryTierManager
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
@@ -171,6 +172,29 @@ def test_tiering_manager_aggregates_secondary_stats():
     second_stats = manager.get_stats()
     assert second_stats is not None
     assert MetricsSecondaryTierManager.MY_TIER_METRIC not in second_stats.data["data"]
+
+
+def test_sidecar_registration_rejects_incapable_tier():
+    """A tier that does not transfer sidecar buffers must fail fast, not
+    silently serve stale rows after promotion."""
+    mock_region = _mock_mmap_region(5)
+    primary_tier = CPUPrimaryTierOffloadingManager(
+        num_blocks=5, mmap_region=mock_region
+    )
+    view = mock_region.create_kv_memoryview()
+    secondary_tier = ExampleSecondaryTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=view,
+        tier_type="example",
+    )
+    manager = TieringOffloadingManager(
+        primary_tier=primary_tier,
+        secondary_tiers=[secondary_tier],
+    )
+
+    sidecar_buffer = TierBlockBuffer(view, view.strides[0], "routing")
+    with pytest.raises(ValueError, match="does not transfer sidecar buffers"):
+        manager.register_secondary_sidecar_buffer(sidecar_buffer)
 
 
 class TestExampleSecondaryTierManager:

@@ -31,6 +31,25 @@ if TYPE_CHECKING:
 JobId = int
 
 
+@dataclass(frozen=True)
+class TierBlockBuffer:
+    """A CPU per-block sidecar buffer that shares the KV blocks' lifecycle.
+
+    Indexed by the same primary-tier block id as the KV cache: view[i] is
+    block i's payload. Passed to SecondaryTierManager.attach_primary_buffer
+    so a sidecar-capable backend cascades / promotes it with the KV blocks.
+
+    Args:
+        view: C-contiguous view of the buffer.
+        block_size: Number of bytes in each block.
+        name: Stable identifier for backend-specific storage.
+    """
+
+    view: memoryview
+    block_size: int
+    name: str = "kv"
+
+
 @dataclass
 class JobMetadata:
     """Metadata for an in-flight async transfer job."""
@@ -101,6 +120,9 @@ class SecondaryTierManager(ABC):
     async jobs; get_finished_jobs() polls for completion.
     """
 
+    # Whether this backend moves attached sidecar buffers along with KV.
+    transfers_sidecar_buffers: bool = False
+
     def __init__(
         self,
         offloading_spec: "OffloadingSpec",
@@ -117,6 +139,14 @@ class SecondaryTierManager(ABC):
         self._offloading_spec = offloading_spec
         self._primary_kv_view: memoryview = primary_kv_view
         self.tier_type = tier_type
+
+    def attach_primary_buffer(self, buffer: TierBlockBuffer) -> None:  # noqa: B027
+        """Attach a per-block sidecar buffer that moves with the KV blocks.
+
+        Must be called before any transfer is submitted. Default no-op:
+        backends that transfer sidecar buffers override this and record the
+        buffer for their store/load path.
+        """
 
     @abstractmethod
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
