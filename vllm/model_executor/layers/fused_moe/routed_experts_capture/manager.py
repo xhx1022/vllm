@@ -340,3 +340,12 @@ class RoutedExpertsManager:
     def get_by_slots(self, slots: np.ndarray) -> np.ndarray:
         """Read routing for explicit slot indices (decode path)."""
         return self.routed_experts_by_slot[slots]
+
+    def store_by_slots(self, routing_data: np.ndarray, slots: np.ndarray) -> None:
+        """Store rows received through the remote worker output transport."""
+        if len(routing_data) != len(slots):
+            raise RuntimeError(
+                "routed-experts transport returned mismatched rows and slots: "
+                f"rows={len(routing_data)}, slots={len(slots)}"
+            )
+        self.routed_experts_by_slot[slots] = routing_data

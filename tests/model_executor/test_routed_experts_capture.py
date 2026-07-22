@@ -4,6 +4,7 @@ import types
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import numpy as np
 import pytest
 import torch
 
@@ -11,9 +12,14 @@ from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.routed_experts_capture import (
     RoutedExpertsCapturer,
+    RoutedExpertsManager,
     RoutedExpertsTensors,
+    RoutedExpertsWorkerWriter,
     RoutedExpertsWriteTask,
     require_full_attn_group_id,
+)
+from vllm.model_executor.layers.fused_moe.routed_experts_capture.shared_region import (
+    SharedRoutingRegion,
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 from vllm.v1.kv_cache_interface import (
@@ -52,7 +58,11 @@ def test_routed_experts_write_task_publishes_copied_tensors():
     routing_data = torch.tensor([[[1, 2]], [[3, 4]]], dtype=torch.int32)
     slot_mapping = torch.tensor([5, 9], dtype=torch.int64)
     writer = Mock()
-    output = SimpleNamespace(routed_experts_slots=None)
+    writer.store_batch.return_value = True
+    output = SimpleNamespace(
+        routed_experts_slots=None,
+        routed_experts_data=None,
+    )
     write_task = RoutedExpertsWriteTask(
         routed_experts_tensors=RoutedExpertsTensors(routing_data, slot_mapping),
         writer=writer,
@@ -65,6 +75,87 @@ def test_routed_experts_write_task_publishes_copied_tensors():
     assert stored_routing.tolist() == routing_data.tolist()
     assert stored_slots.tolist() == slot_mapping.tolist()
     assert output.routed_experts_slots.tolist() == slot_mapping.tolist()
+    assert output.routed_experts_data is None
+
+
+def test_routed_experts_write_task_returns_payload_when_mmap_is_unavailable():
+    routing_data = torch.tensor([[[1, 2]], [[3, 4]]], dtype=torch.int32)
+    slot_mapping = torch.tensor([5, 9], dtype=torch.int64)
+    writer = Mock()
+    writer.store_batch.return_value = False
+    output = SimpleNamespace(
+        routed_experts_slots=None,
+        routed_experts_data=None,
+    )
+    write_task = RoutedExpertsWriteTask(
+        routed_experts_tensors=RoutedExpertsTensors(routing_data, slot_mapping),
+        writer=writer,
+    )
+
+    write_task.start_copy()
+    write_task.finalize(output)
+
+    assert output.routed_experts_slots.tolist() == slot_mapping.tolist()
+    assert output.routed_experts_data.tolist() == routing_data.tolist()
+
+
+def test_worker_writer_uses_shared_mmap_when_visible(tmp_path):
+    path = str(tmp_path / "routed-experts.mmap")
+    shape = (8, 1, 2)
+    region = SharedRoutingRegion(path=path, shape=shape, dtype=np.int32)
+    writer = RoutedExpertsWorkerWriter(
+        instance_id="unused",
+        dp_rank=0,
+        slot_shape=shape,
+        dtype=np.int32,
+    )
+    writer._path = path
+    routing_data = np.array([[[1, 2]], [[3, 4]]], dtype=np.int32)
+    slots = np.array([2, 6], dtype=np.int64)
+
+    try:
+        assert writer.store_batch(routing_data, slots)
+        np.testing.assert_array_equal(region.array[slots], routing_data)
+    finally:
+        writer.close()
+        region.close()
+
+
+def test_worker_writer_requests_transport_fallback_when_mmap_is_hidden(tmp_path):
+    writer = RoutedExpertsWorkerWriter(
+        instance_id="unused",
+        dp_rank=0,
+        slot_shape=(8, 1, 2),
+        dtype=np.int32,
+    )
+    writer._path = str(tmp_path / "missing.mmap")
+    routing_data = np.array([[[1, 2]]], dtype=np.int32)
+    slots = np.array([2], dtype=np.int64)
+
+    assert not writer.store_batch(routing_data, slots)
+    assert not writer.store_batch(routing_data, slots)
+
+
+def test_manager_stores_remote_transport_rows_by_slot():
+    manager = RoutedExpertsManager.__new__(RoutedExpertsManager)
+    manager.routed_experts_by_slot = np.zeros((8, 1, 2), dtype=np.int32)
+    routing_data = np.array([[[1, 2]], [[3, 4]]], dtype=np.int32)
+    slots = np.array([2, 6], dtype=np.int64)
+
+    manager.store_by_slots(routing_data, slots)
+
+    np.testing.assert_array_equal(manager.get_by_slots(slots), routing_data)
+
+
+def test_manager_rejects_mismatched_remote_transport_rows():
+    manager = RoutedExpertsManager.__new__(RoutedExpertsManager)
+    manager.routed_experts_by_slot = np.zeros((8, 1, 2), dtype=np.int32)
+
+    with pytest.raises(RuntimeError, match="mismatched rows and slots"):
+        manager.store_by_slots(
+            np.zeros((2, 1, 2), dtype=np.int32),
+            np.array([2], dtype=np.int64),
+        )
 
 
 def _capturer_with_buffer(

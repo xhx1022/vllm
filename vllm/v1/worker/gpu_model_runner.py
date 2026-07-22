@@ -4730,8 +4730,14 @@ class GPUModelRunner(
                 slot_mapping = self.routed_experts_slot_mapping_cpu[
                     :total_num_scheduled_tokens
                 ].numpy()
-                self.routed_experts_writer.store_batch(routing_data, slot_mapping)
+                stored_in_mmap = self.routed_experts_writer.store_batch(
+                    routing_data, slot_mapping
+                )
                 output.routed_experts_slots = slot_mapping
+                if not stored_in_mmap:
+                    # The synchronous CPU staging buffer is reused next step.
+                    # Keep remote zero-copy sends independent of that buffer.
+                    output.routed_experts_data = routing_data.copy()
             return output
 
         with record_function_or_nullcontext(

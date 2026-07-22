@@ -15,6 +15,7 @@ from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
+from vllm.v1.outputs import ModelRunnerOutput
 
 
 def get_arrays(n: int, seed: int = 0) -> list[np.ndarray]:
@@ -23,6 +24,42 @@ def get_arrays(n: int, seed: int = 0) -> list[np.ndarray]:
     # on average, each array will have 5k elements
     # with int64, each array will have 40kb
     return [np.random.randint(1, 100, i) for i in sizes]
+
+
+def test_remote_message_queue_transports_routed_experts_output():
+    writer = MessageQueue(
+        n_reader=1,
+        n_local_reader=0,
+        connect_ip="127.0.0.1",
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    writer_ready = threading.Thread(target=writer.wait_until_ready)
+    writer_ready.start()
+    reader.wait_until_ready()
+    writer_ready.join(timeout=5)
+    assert not writer_ready.is_alive()
+
+    routing_data = np.arange(12, dtype=np.int32).reshape(2, 3, 2)
+    slot_mapping = np.array([5, 9], dtype=np.int64)
+    output = ModelRunnerOutput(
+        req_ids=["request"],
+        req_id_to_index={"request": 0},
+        routed_experts_slots=slot_mapping,
+        routed_experts_data=routing_data,
+    )
+
+    try:
+        writer.enqueue(output)
+        received = reader.dequeue(timeout=5)
+
+        assert writer.n_remote_reader == 1
+        remote_addr = writer.export_handle().remote_subscribe_addr
+        assert remote_addr is not None and remote_addr.startswith("tcp://")
+        np.testing.assert_array_equal(received.routed_experts_slots, slot_mapping)
+        np.testing.assert_array_equal(received.routed_experts_data, routing_data)
+    finally:
+        writer.shutdown()
+        reader.shutdown()
 
 
 def distributed_run(fn, world_size, timeout=60):

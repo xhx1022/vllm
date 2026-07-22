@@ -112,22 +112,28 @@ class RoutedExpertsWorkerWriter:
         self._fd: int | None = None
         self._mmap_obj: mmap.mmap | None = None
         self._array: np.ndarray | None = None
+        self._mmap_unavailable = False
 
-    def _ensure_mmap_attached(self) -> None:
+    def _ensure_mmap_attached(self) -> bool:
         if self._array is not None:
-            return
-        deadline = time.monotonic() + _WAIT_TIMEOUT_S
-        while True:
-            try:
-                file_descriptor = os.open(self._path, os.O_RDWR)
-                break
-            except FileNotFoundError:
-                if time.monotonic() > deadline:
-                    raise TimeoutError(
-                        f"Timed out waiting for shared routed-experts mmap "
-                        f"to appear at {self._path}"
-                    ) from None
-                time.sleep(0.005)
+            return True
+        if self._mmap_unavailable:
+            return False
+        try:
+            file_descriptor = os.open(self._path, os.O_RDWR)
+        except FileNotFoundError:
+            # The scheduler creates the mmap before it accepts requests. If the
+            # output worker cannot see it on the first model step, the worker is
+            # in a different shared-memory namespace (normally another node).
+            # Return the payload in ModelRunnerOutput so the executor's existing
+            # response MessageQueue can select its remote TCP transport.
+            self._mmap_unavailable = True
+            logger.info_once(
+                "Routed-experts mmap %s is not visible to the output worker; "
+                "falling back to the ModelRunnerOutput transport",
+                self._path,
+            )
+            return False
         _wait_for_file_size(file_descriptor, self._nbytes, _WAIT_TIMEOUT_S)
         self._fd = file_descriptor
         self._mmap_obj = mmap.mmap(
@@ -139,12 +145,15 @@ class RoutedExpertsWorkerWriter:
         self._array = np.frombuffer(self._mmap_obj, dtype=self._dtype).reshape(
             self._slot_shape
         )
+        return True
 
-    def store_batch(self, routing_data: np.ndarray, slot_mapping: np.ndarray) -> None:
-        """Write one step's routed experts into the shared slot buffer."""
-        self._ensure_mmap_attached()
+    def store_batch(self, routing_data: np.ndarray, slot_mapping: np.ndarray) -> bool:
+        """Write routing to mmap, or report that transport fallback is needed."""
+        if not self._ensure_mmap_attached():
+            return False
         assert self._array is not None, "shared routing mmap was not attached"
         self._array[slot_mapping] = routing_data
+        return True
 
     def close(self) -> None:
         """Release the mapping. The manager owns the file."""

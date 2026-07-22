@@ -1678,15 +1678,26 @@ class Scheduler(SchedulerInterface):
                 num_scheduled_tokens,
             )
 
-        # The worker stores routing in shared memory and returns per-step slot
-        # indices. Keeping slots in ModelRunnerOutput prevents a later async
-        # schedule from overwriting request-keyed metadata. Slots follow
-        # model_runner_output.req_ids order, and lock-free access relies on
-        # EngineCore processing step outputs in FIFO order.
+        # A local output worker stores routing in shared memory and returns only
+        # per-step slots. A remote output worker returns the same slots plus the
+        # routing rows through ModelRunnerOutput; populate the scheduler-local
+        # sidecar before offload transfers or request outputs read it. Slots
+        # follow model_runner_output.req_ids order, and FIFO output processing
+        # keeps them paired under async scheduling.
         routing_slots = None
         routing_offsets: dict[str, int] = {}
         if model_runner_output.routed_experts_slots is not None:
             routing_slots = model_runner_output.routed_experts_slots
+            routing_data = model_runner_output.routed_experts_data
+            if routing_data is not None:
+                self.routed_experts_manager.store_by_slots(
+                    routing_data,
+                    routing_slots,
+                )
+                logger.info_once(
+                    "Receiving routed-experts payload through the remote "
+                    "ModelRunnerOutput transport"
+                )
             offset = 0
             for request_id in model_runner_output.req_ids:
                 routing_offsets[request_id] = offset

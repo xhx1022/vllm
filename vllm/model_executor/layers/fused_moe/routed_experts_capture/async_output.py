@@ -74,8 +74,10 @@ class RoutedExpertsWriteTask:
             "routed-experts CPU tensors are unavailable; call start_copy first"
         )
         routed_experts = self._routed_experts_tensors_cpu.tolists()
-        self.writer.store_batch(
+        stored_in_mmap = self.writer.store_batch(
             routed_experts.routing_data,
             routed_experts.slot_mapping,
         )
         output.routed_experts_slots = routed_experts.slot_mapping
+        if not stored_in_mmap:
+            output.routed_experts_data = routed_experts.routing_data
