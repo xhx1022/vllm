@@ -2183,6 +2183,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         model_runner_output.kv_connector_output = kv_connector_output
         model_runner_output.ec_connector_output = ec_connector_output
 
+        if pending_aux_output is not None:
+            async_output.copy_event.synchronize()
+            model_runner_output.aux_output_connector_output = (
+                pending_aux_output.connector.process_output(
+                    model_runner_output.req_ids,
+                    pending_aux_output.token_starts,
+                    pending_aux_output.query_start_loc,
+                    async_output.routed_experts,
+                    async_output.num_sampled_tokens_np,
+                    async_output.num_rejected,
+                )
+            )
+
         return async_output
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:

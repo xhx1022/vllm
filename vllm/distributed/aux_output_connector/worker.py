@@ -6,7 +6,6 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from threading import Event
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -55,11 +54,6 @@ class PendingAuxOutput:
     token_starts: np.ndarray
     query_start_loc: np.ndarray
     routed_experts: torch.Tensor
-    finished: Event = field(default_factory=Event)
-
-    def complete(self) -> None:
-        self.connector._pending_output = None
-        self.finished.set()
 
 
 class AuxOutputWorkerConnector:
@@ -84,7 +78,6 @@ class AuxOutputWorkerConnector:
         self._requests: dict[str, _WorkerRequestState] = {}
         self._generation = 0
         self._step_metadata: AuxOutputConnectorMetadata | None = None
-        self._pending_output: PendingAuxOutput | None = None
         # Every TP rank participates in capture collectives, but only the
         # executor output rank owns the auxiliary output data plane.
         if not get_tp_group().is_first_rank:
@@ -126,18 +119,15 @@ class AuxOutputWorkerConnector:
         buffer = self._buffer
         if buffer is None or self._step_metadata is None:
             return None
-        assert self._pending_output is None
 
         query_start_loc = query_start_loc[: len(request_ids) + 1]
         num_rows = int(query_start_loc[-1])
-        pending_output = PendingAuxOutput(
+        return PendingAuxOutput(
             self,
             token_starts,
             query_start_loc,
             self._capturer.snapshot_routing_data(num_rows),
         )
-        self._pending_output = pending_output
-        return pending_output
 
     def process_output(
         self,
@@ -279,8 +269,6 @@ class AuxOutputWorkerConnector:
 
     def begin_step(self, metadata: AuxOutputConnectorMetadata | None) -> None:
         """Apply one scheduler step's request and block-hash updates."""
-        if pending_output := self._pending_output:
-            pending_output.finished.wait()
         self._step_metadata = metadata
         if self._buffer is None or metadata is None:
             return
