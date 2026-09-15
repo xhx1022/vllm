@@ -155,6 +155,7 @@ def _make_worker(
     max_num_batched_tokens: int | None = None,
     max_concurrent_batches: int = 2,
     max_store_blocks: int | None = None,
+    device: torch.device | None = None,
 ) -> AuxOutputWorkerConnector:
     object_nbytes = _BLOCK_SIZE * int(np.prod(_SHAPE))
     store = _make_store(
@@ -172,10 +173,10 @@ def _make_worker(
         max_num_seqs,
         max_num_batched_tokens or max_num_seqs * _BLOCK_SIZE,
         max_concurrent_batches,
+        device=device,
     )
     worker._requests = {}
     worker._generation = 0
-    worker._pending_output = None
     return worker
 
 
@@ -225,27 +226,29 @@ def test_worker_skips_aux_outputs_for_internal_warmup_step():
     worker.close()
 
 
-def test_worker_waits_for_previous_aux_output_before_next_step():
-    worker = _make_worker(1)
-    finished = threading.Event()
-    worker._pending_output = SimpleNamespace(finished=finished)
-    entered = threading.Event()
-    returned = threading.Event()
-
-    def begin_step():
-        entered.set()
-        worker.begin_step(_metadata(0, [], {}).metadata)
-        returned.set()
-
-    thread = threading.Thread(target=begin_step)
-    thread.start()
-    assert entered.wait(1)
-    assert not returned.wait(0.05)
-    worker._pending_output = None
-    finished.set()
-    assert returned.wait(1)
-    thread.join()
-    assert worker._pending_output is None
+@pytest.mark.parametrize("device", [None, torch.device("cpu")])
+def test_completed_cpu_output_survives_terminal_cleanup(device):
+    """Execution commits rows before cleanup; the output owns independent data."""
+    worker = _make_worker(1, device=device)
+    rows = np.arange(4 * 3 * 2, dtype=_DTYPE).reshape(4, *_SHAPE)
+    _process_output(
+        worker,
+        _metadata(0, [_request_metadata("r", 0, 3, 0, [])], {}),
+        rows[:3],
+        ["r"],
+        np.array([0]),
+        np.array([0]),
+    )
+    result = _process_output(
+        worker,
+        _metadata(0, [_request_metadata("r", 3, 1, 0, [b"a" * 32])], {}),
+        rows[3:],
+        ["r"],
+        np.array([0]),
+    )
+    worker.begin_step(_metadata(0, [], {"r": []}).metadata)
+    assert worker._requests == {}
+    np.testing.assert_array_equal(result["r"].rows, rows)
     worker.close()
 
 
@@ -289,6 +292,10 @@ def _process_output(
         token_starts, num_tokens = _execution_ranges(step, request_ids)
     worker._capturer = Mock()
     worker._capturer.snapshot_routing_data.return_value = torch.from_numpy(rows)
+    if isinstance(worker._buffer._rows, torch.Tensor):
+        worker._capturer.snapshot_routing_data.return_value = torch.from_numpy(rows).to(
+            worker._buffer._rows.device
+        )
     metadata = step.metadata if isinstance(step, _WorkerStep) else step
     worker.begin_step(metadata)
     if query_start_loc is None:
@@ -301,17 +308,16 @@ def _process_output(
         query_start_loc,
     )
     assert pending is not None
-    try:
-        return worker.process_output(
-            request_ids,
-            pending.token_starts,
-            pending.query_start_loc,
-            pending.routed_experts.cpu().numpy(),
-            num_sampled,
-            num_rejected,
-        )
-    finally:
-        pending.complete()
+    return worker.process_output(
+        request_ids,
+        pending.token_starts,
+        pending.query_start_loc,
+        pending.routed_experts
+        if isinstance(worker._buffer._rows, torch.Tensor)
+        else pending.routed_experts.cpu().numpy(),
+        num_sampled,
+        num_rejected,
+    )
 
 
 def test_worker_ignores_cudagraph_query_padding():

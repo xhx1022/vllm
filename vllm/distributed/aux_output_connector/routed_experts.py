@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+import torch
 
 from vllm.distributed.aux_output_connector.store import (
     BackgroundBlockObjectStore,
@@ -35,6 +36,8 @@ class RoutedExpertsBuffer:
         max_num_seqs: int,
         max_num_batched_tokens: int,
         max_concurrent_batches: int,
+        *,
+        device: torch.device | None = None,
     ) -> None:
         self.dtype = dtype
         self.shape_per_token = shape_per_token
@@ -44,8 +47,15 @@ class RoutedExpertsBuffer:
         ) // block_size + max_num_seqs
         # In-flight full blocks plus one incomplete tail per active request.
         max_blocks = max_concurrent_batches * max_step_blocks + max_num_seqs
-        self._rows: np.ndarray = np.empty(
-            (max_blocks, block_size, *shape_per_token), dtype=dtype
+        shape = (max_blocks, block_size, *shape_per_token)
+        self._rows: np.ndarray | torch.Tensor = (
+            np.empty(shape, dtype=dtype)
+            if device is None
+            else torch.empty(
+                shape,
+                dtype=torch.from_numpy(np.empty(0, dtype=dtype)).dtype,
+                device=device,
+            )
         )
         self._free_slots = list(range(len(self._rows) - 1, -1, -1))
         self._owned_slots: dict[int, int] = {}
@@ -66,17 +76,16 @@ class RoutedExpertsBuffer:
         return tail
 
     def capture(
-        self, request_id: Hashable, token_start: int, rows: np.ndarray
-    ) -> list[tuple[int, np.ndarray]]:
+        self, request_id: Hashable, token_start: int, rows: np.ndarray | torch.Tensor
+    ) -> list[tuple[int, np.ndarray | torch.Tensor]]:
         """Stage rows and return completed blocks without retaining them."""
-        rows = np.asarray(rows)
-        assert rows.shape[1:] == self.shape_per_token and rows.dtype == self.dtype, (
-            "routed-experts capture profile changed"
-        )
+        assert (
+            rows.shape[1:] == self.shape_per_token and rows.dtype == self._rows.dtype
+        ), "routed-experts capture profile changed"
         if token_start < 0:
             raise ValueError("auxiliary output token start must be non-negative")
 
-        completed: list[tuple[int, np.ndarray]] = []
+        completed: list[tuple[int, np.ndarray | torch.Tensor]] = []
         offset = 0
         while offset < len(rows):
             position = token_start + offset
@@ -130,9 +139,16 @@ class RoutedExpertsBuffer:
             f"request={request_id}, range=[{token_start}, {token_end}), "
             f"available=[{tail.block_start}, {tail.block_start + tail.length})"
         )
-        return self._rows[tail.slot, local_start:local_end].copy()
+        rows = self._rows[tail.slot, local_start:local_end]
+        return (
+            rows.to("cpu", copy=True).numpy()
+            if isinstance(rows, torch.Tensor)
+            else rows.copy()
+        )
 
-    def retain_block(self, rows: np.ndarray) -> np.ndarray:
+    def retain_block(
+        self, rows: np.ndarray | torch.Tensor
+    ) -> np.ndarray | torch.Tensor:
         """Retain one unkeyed block after the current capture call."""
         if id(rows) in self._owned_slots:
             return rows
@@ -143,7 +159,7 @@ class RoutedExpertsBuffer:
         self._owned_slots[id(retained)] = slot
         return retained
 
-    def release_block(self, rows: np.ndarray) -> None:
+    def release_block(self, rows: np.ndarray | torch.Tensor) -> None:
         slot = self._owned_slots.pop(id(rows), None)
         if slot is not None:
             self._free_slots.append(slot)
@@ -182,7 +198,9 @@ def materialize_routed_experts(
 def publish_routed_experts(
     store: BackgroundBlockObjectStore | BlockObjectStore,
     *,
-    batches: Sequence[tuple[Sequence[str], list[tuple[int, np.ndarray]]]],
+    batches: Sequence[
+        tuple[Sequence[str], list[tuple[int, np.ndarray | torch.Tensor]]]
+    ],
     block_size: int,
     retain_keys: Sequence[str] = (),
     release_keys: Sequence[str] = (),
@@ -206,6 +224,8 @@ def publish_routed_experts(
                 raise ValueError(
                     "auxiliary output block length does not match hash block size"
                 )
+            if isinstance(array, torch.Tensor):
+                array = array.cpu().numpy()
             objects.append(
                 BlockObject(
                     key=aux_output_keys[block_index],

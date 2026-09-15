@@ -86,6 +86,7 @@ from vllm.v1.worker.gpu.async_utils import (
     AsyncOutput,
     AsyncPoolingOutput,
     StepTimingCollector,
+    stream,
 )
 from vllm.v1.worker.gpu.attn_utils import (
     FastPrefillHelper,
@@ -2182,6 +2183,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
         model_runner_output.kv_connector_output = kv_connector_output
         model_runner_output.ec_connector_output = ec_connector_output
+
+        if pending_aux_output is not None:
+            async_output.copy_event.synchronize()
+            with stream(self.output_copy_stream, self.main_stream):
+                model_runner_output.aux_output_connector_output = (
+                    pending_aux_output.connector.process_output(
+                        model_runner_output.req_ids,
+                        pending_aux_output.token_starts,
+                        pending_aux_output.query_start_loc,
+                        pending_aux_output.routed_experts,
+                        async_output.num_sampled_tokens_np,
+                        async_output.num_rejected,
+                    )
+                )
+            # Even a no-output chunk can leave GPU tail writes in flight.
+            self.output_copy_stream.synchronize()
 
         return async_output
 
