@@ -129,7 +129,6 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.model_runner_output = model_runner_output
         self.sampler_output = sampler_output
         self.num_sampled_tokens = num_sampled_tokens
-        self.pending_aux_output = pending_aux_output
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
         self.copy_event = torch.cuda.Event(blocking=True)
         self._has_fault: torch.Tensor | None = None
@@ -194,22 +193,6 @@ class AsyncOutput(AsyncModelRunnerOutput):
         if self.logprobs_tensors is not None:
             self.model_runner_output.logprobs = self.logprobs_tensors.tolists()
         self.model_runner_output.prompt_logprobs_dict = self.prompt_logprobs_dict
-        if self.pending_aux_output is not None:
-            pending = self.pending_aux_output
-            try:
-                self.model_runner_output.aux_output_connector_output = (
-                    pending.connector.process_output(
-                        self.model_runner_output.req_ids,
-                        pending.token_starts,
-                        pending.query_start_loc,
-                        self.routed_experts,
-                        self.num_sampled_tokens_np,
-                        self.num_rejected,
-                    )
-                )
-            finally:
-                pending.complete()
-
         if self._has_fault is not None and self._has_fault.item():
             mask = get_ep_all2all_manager().query_active_mask()
             raise RuntimeError(
