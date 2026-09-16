@@ -33,8 +33,10 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed.aux_output_connector.gpu_output import finish_aux_output
-from vllm.distributed.aux_output_connector.worker import AuxOutputWorkerConnector
+from vllm.distributed.aux_output_connector.worker import (
+    AuxOutputWorkerConnector,
+    finish_aux_output,
+)
 from vllm.distributed.parallel_state import (
     get_dcp_group,
     get_pp_group,

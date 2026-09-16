@@ -253,7 +253,7 @@ def test_completed_cpu_output_survives_terminal_cleanup():
 
 def test_aux_completion_waits_before_processing_and_drains_no_output(monkeypatch):
     """Host data must be ready; GPU tail writes must not outlive completion."""
-    from vllm.distributed.aux_output_connector import gpu_output
+    from vllm.distributed.aux_output_connector import worker
 
     events = []
     output = SimpleNamespace(
@@ -276,9 +276,9 @@ def test_aux_completion_waits_before_processing_and_drains_no_output(monkeypatch
     )
     from contextlib import nullcontext
 
-    monkeypatch.setattr(gpu_output, "stream", lambda *args: nullcontext())
+    monkeypatch.setattr(worker, "stream", lambda *args: nullcontext())
     copy_stream = SimpleNamespace(synchronize=lambda: events.append("drained"))
-    gpu_output.finish_aux_output(output, pending, None, copy_stream)
+    worker.finish_aux_output(output, pending, None, copy_stream)
     assert events == ["ready", "process", "drained"]
     assert output.model_runner_output.aux_output_connector_output == {}
 
