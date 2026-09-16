@@ -251,7 +251,7 @@ def test_completed_cpu_output_survives_terminal_cleanup():
 
 def test_aux_completion_waits_before_processing():
     """Host data must be ready; GPU tail writes must not outlive completion."""
-    from vllm.distributed.aux_output_connector import gpu_output
+    from vllm.distributed.aux_output_connector import worker
 
     events = []
     output = SimpleNamespace(
@@ -272,7 +272,7 @@ def test_aux_completion_waits_before_processing():
         query_start_loc=None,
         routed_experts=None,
     )
-    gpu_output.finish_aux_output(output, pending)
+    worker.finish_aux_output(output, pending)
     assert events == ["ready", "process"]
     assert output.model_runner_output.aux_output_connector_output == {}
 
