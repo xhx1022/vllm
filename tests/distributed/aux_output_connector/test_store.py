@@ -155,7 +155,7 @@ def _make_worker(
     max_num_batched_tokens: int | None = None,
     max_concurrent_batches: int = 2,
     max_store_blocks: int | None = None,
-    device: torch.device | None = None,
+    device: torch.device | str = "cpu",
 ) -> AuxOutputWorkerConnector:
     object_nbytes = _BLOCK_SIZE * int(np.prod(_SHAPE))
     store = _make_store(
@@ -210,7 +210,7 @@ def test_non_output_rank_skips_capture_snapshot():
     worker._store = None
     worker._buffer = None
     worker._capturer = Mock()
-    worker._step_metadata = Mock()
+    worker._has_step_metadata = True
     assert worker.prepare_output([], np.array([]), np.array([])) is None
     worker._capturer.snapshot_routing_data.assert_not_called()
 
@@ -226,10 +226,9 @@ def test_worker_skips_aux_outputs_for_internal_warmup_step():
     worker.close()
 
 
-@pytest.mark.parametrize("device", [None, torch.device("cpu")])
-def test_completed_cpu_output_survives_terminal_cleanup(device):
+def test_completed_cpu_output_survives_terminal_cleanup():
     """Execution commits rows before cleanup; the output owns independent data."""
-    worker = _make_worker(1, device=device)
+    worker = _make_worker(1)
     rows = np.arange(4 * 3 * 2, dtype=_DTYPE).reshape(4, *_SHAPE)
     _process_output(
         worker,
@@ -250,6 +249,38 @@ def test_completed_cpu_output_survives_terminal_cleanup(device):
     assert worker._requests == {}
     np.testing.assert_array_equal(result["r"].rows, rows)
     worker.close()
+
+
+def test_aux_completion_waits_before_processing_and_drains_no_output(monkeypatch):
+    """Host data must be ready; GPU tail writes must not outlive completion."""
+    from vllm.distributed.aux_output_connector import gpu_output
+
+    events = []
+    output = SimpleNamespace(
+        copy_event=SimpleNamespace(synchronize=lambda: events.append("ready")),
+        model_runner_output=SimpleNamespace(req_ids=["r"]),
+        routed_experts=None,
+        num_sampled_tokens_np=None,
+        num_rejected=None,
+    )
+
+    def process_output(*args):
+        events.append("process")
+        return {}
+
+    pending = SimpleNamespace(
+        connector=SimpleNamespace(process_output=process_output),
+        token_starts=None,
+        query_start_loc=None,
+        routed_experts=None,
+    )
+    from contextlib import nullcontext
+
+    monkeypatch.setattr(gpu_output, "stream", lambda *args: nullcontext())
+    copy_stream = SimpleNamespace(synchronize=lambda: events.append("drained"))
+    gpu_output.finish_aux_output(output, pending, None, copy_stream)
+    assert events == ["ready", "process", "drained"]
+    assert output.model_runner_output.aux_output_connector_output == {}
 
 
 def test_worker_rejects_invalid_rejected_token_count():
@@ -291,11 +322,9 @@ def _process_output(
         assert isinstance(step, _WorkerStep)
         token_starts, num_tokens = _execution_ranges(step, request_ids)
     worker._capturer = Mock()
-    worker._capturer.snapshot_routing_data.return_value = torch.from_numpy(rows)
-    if isinstance(worker._buffer._rows, torch.Tensor):
-        worker._capturer.snapshot_routing_data.return_value = torch.from_numpy(rows).to(
-            worker._buffer._rows.device
-        )
+    worker._capturer.snapshot_routing_data.return_value = torch.from_numpy(rows).to(
+        worker._buffer._rows.device
+    )
     metadata = step.metadata if isinstance(step, _WorkerStep) else step
     worker.begin_step(metadata)
     if query_start_loc is None:
@@ -312,9 +341,7 @@ def _process_output(
         request_ids,
         pending.token_starts,
         pending.query_start_loc,
-        pending.routed_experts
-        if isinstance(worker._buffer._rows, torch.Tensor)
-        else pending.routed_experts.cpu().numpy(),
+        pending.routed_experts,
         num_sampled,
         num_rejected,
     )
@@ -412,11 +439,11 @@ def test_logical_buffer_rejects_noncontiguous_capture(
     buffer = RoutedExpertsBuffer(np.dtype("uint8"), (1,), 4, 1, 4, 1)
     if initial_start is not None:
         rows = np.asarray(initial_rows, dtype=np.uint8).reshape(-1, 1)
-        assert buffer.capture("request", initial_start, rows) == []
+        assert buffer.capture("request", initial_start, torch.from_numpy(rows)) == []
 
     with pytest.raises(AssertionError, match="not contiguous"):
         buffer.capture(
-            "request", invalid_start, np.array([[invalid_start]], dtype=np.uint8)
+            "request", invalid_start, torch.tensor([[invalid_start]], dtype=torch.uint8)
         )
 
 
@@ -426,7 +453,9 @@ def test_logical_buffer_captures_one_row_per_decode_step():
 
     completed = []
     for step in range(_BLOCK_SIZE):
-        completed += buffer.capture("request", step, logical[step : step + 1])
+        completed += buffer.capture(
+            "request", step, torch.from_numpy(logical[step : step + 1])
+        )
 
     assert len(completed) == 1
     np.testing.assert_array_equal(completed[0][1], logical)
@@ -437,7 +466,7 @@ def test_logical_buffer_copies_borrowed_block_when_retained():
     logical = np.arange(_BLOCK_SIZE * 3 * 2, dtype=_DTYPE).reshape(_BLOCK_SIZE, *_SHAPE)
 
     expected = logical.copy()
-    completed = buffer.capture("request", 0, logical)
+    completed = buffer.capture("request", 0, torch.from_numpy(logical))
     retained = buffer.retain_block(completed[0][1])
     logical[:] = 0
 
@@ -463,7 +492,7 @@ def test_publish_routed_experts_publishes_full_blocks():
     logical = np.arange(8 * 3 * 2, dtype=np.uint8).reshape(8, 3, 2)
     hashes = [b"a" * 32, b"b" * 32]
     keys = routed_experts_keys(hashes, "0")
-    blocks = buffer.capture("request", 0, logical)
+    blocks = buffer.capture("request", 0, torch.from_numpy(logical))
     publish_routed_experts(
         store,
         batches=[(keys, blocks)],
@@ -818,7 +847,7 @@ def test_worker_publishes_pending_block_without_forward():
     logical = np.arange(_BLOCK_SIZE * 3 * 2, dtype=np.uint8).reshape(_BLOCK_SIZE, 3, 2)
     assert worker._buffer is not None
     worker._requests["request"].pending_blocks = [
-        (0, worker._buffer.retain_block(logical))
+        (0, worker._buffer.retain_block(torch.from_numpy(logical)))
     ]
     block_hash = b"a" * 32
 

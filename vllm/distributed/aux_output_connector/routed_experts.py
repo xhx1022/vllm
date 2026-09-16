@@ -37,7 +37,7 @@ class RoutedExpertsBuffer:
         max_num_batched_tokens: int,
         max_concurrent_batches: int,
         *,
-        device: torch.device | None = None,
+        device: torch.device | str = "cpu",
     ) -> None:
         self.dtype = dtype
         self.shape_per_token = shape_per_token
@@ -48,14 +48,10 @@ class RoutedExpertsBuffer:
         # In-flight full blocks plus one incomplete tail per active request.
         max_blocks = max_concurrent_batches * max_step_blocks + max_num_seqs
         shape = (max_blocks, block_size, *shape_per_token)
-        self._rows: np.ndarray | torch.Tensor = (
-            np.empty(shape, dtype=dtype)
-            if device is None
-            else torch.empty(
-                shape,
-                dtype=torch.from_numpy(np.empty(0, dtype=dtype)).dtype,
-                device=device,
-            )
+        self._rows = torch.empty(
+            shape,
+            dtype=torch.from_numpy(np.empty(0, dtype=dtype)).dtype,
+            device=device,
         )
         self._free_slots = list(range(len(self._rows) - 1, -1, -1))
         self._owned_slots: dict[int, int] = {}
@@ -76,8 +72,8 @@ class RoutedExpertsBuffer:
         return tail
 
     def capture(
-        self, request_id: Hashable, token_start: int, rows: np.ndarray | torch.Tensor
-    ) -> list[tuple[int, np.ndarray | torch.Tensor]]:
+        self, request_id: Hashable, token_start: int, rows: torch.Tensor
+    ) -> list[tuple[int, torch.Tensor]]:
         """Stage rows and return completed blocks without retaining them."""
         assert (
             rows.shape[1:] == self.shape_per_token and rows.dtype == self._rows.dtype
@@ -85,7 +81,7 @@ class RoutedExpertsBuffer:
         if token_start < 0:
             raise ValueError("auxiliary output token start must be non-negative")
 
-        completed: list[tuple[int, np.ndarray | torch.Tensor]] = []
+        completed: list[tuple[int, torch.Tensor]] = []
         offset = 0
         while offset < len(rows):
             position = token_start + offset
@@ -140,15 +136,9 @@ class RoutedExpertsBuffer:
             f"available=[{tail.block_start}, {tail.block_start + tail.length})"
         )
         rows = self._rows[tail.slot, local_start:local_end]
-        return (
-            rows.to("cpu", copy=True).numpy()
-            if isinstance(rows, torch.Tensor)
-            else rows.copy()
-        )
+        return rows.to("cpu", copy=True).numpy()
 
-    def retain_block(
-        self, rows: np.ndarray | torch.Tensor
-    ) -> np.ndarray | torch.Tensor:
+    def retain_block(self, rows: torch.Tensor) -> torch.Tensor:
         """Retain one unkeyed block after the current capture call."""
         if id(rows) in self._owned_slots:
             return rows
@@ -159,7 +149,7 @@ class RoutedExpertsBuffer:
         self._owned_slots[id(retained)] = slot
         return retained
 
-    def release_block(self, rows: np.ndarray | torch.Tensor) -> None:
+    def release_block(self, rows: torch.Tensor) -> None:
         slot = self._owned_slots.pop(id(rows), None)
         if slot is not None:
             self._free_slots.append(slot)
@@ -198,9 +188,7 @@ def materialize_routed_experts(
 def publish_routed_experts(
     store: BackgroundBlockObjectStore | BlockObjectStore,
     *,
-    batches: Sequence[
-        tuple[Sequence[str], list[tuple[int, np.ndarray | torch.Tensor]]]
-    ],
+    batches: Sequence[tuple[Sequence[str], list[tuple[int, torch.Tensor]]]],
     block_size: int,
     retain_keys: Sequence[str] = (),
     release_keys: Sequence[str] = (),
@@ -224,12 +212,10 @@ def publish_routed_experts(
                 raise ValueError(
                     "auxiliary output block length does not match hash block size"
                 )
-            if isinstance(array, torch.Tensor):
-                array = array.cpu().numpy()
             objects.append(
                 BlockObject(
                     key=aux_output_keys[block_index],
-                    payload=array.tobytes(order="C"),
+                    payload=array.cpu().numpy().tobytes(order="C"),
                 )
             )
     store.put(

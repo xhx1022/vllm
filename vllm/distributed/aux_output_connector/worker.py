@@ -40,9 +40,7 @@ if TYPE_CHECKING:
 @dataclass
 class _WorkerRequestState:
     aux_output_keys: list[str] = field(default_factory=list)
-    pending_blocks: list[tuple[int, np.ndarray | torch.Tensor]] = field(
-        default_factory=list
-    )
+    pending_blocks: list[tuple[int, torch.Tensor]] = field(default_factory=list)
     capture_cursor: int | None = None
     scheduled_cursor: int = 0
     emit_cursor: int = 0
@@ -79,7 +77,7 @@ class AuxOutputWorkerConnector:
         self._buffer: RoutedExpertsBuffer | None = None
         self._requests: dict[str, _WorkerRequestState] = {}
         self._generation = 0
-        self._step_metadata: AuxOutputConnectorMetadata | None = None
+        self._has_step_metadata = False
         # Every TP rank participates in capture collectives, but only the
         # executor output rank owns the auxiliary output data plane.
         if not get_tp_group().is_first_rank:
@@ -119,8 +117,7 @@ class AuxOutputWorkerConnector:
         query_start_loc: np.ndarray,
     ) -> PendingAuxOutput | None:
         """Snapshot one step's R3 tensor for asynchronous CPU transfer."""
-        buffer = self._buffer
-        if buffer is None or self._step_metadata is None:
+        if self._buffer is None or not self._has_step_metadata:
             return None
 
         query_start_loc = query_start_loc[: len(request_ids) + 1]
@@ -137,7 +134,7 @@ class AuxOutputWorkerConnector:
         request_ids: list[str],
         token_starts: np.ndarray,
         query_start_loc: np.ndarray,
-        routed_experts: np.ndarray | torch.Tensor,
+        routed_experts: torch.Tensor,
         num_sampled: np.ndarray,
         num_rejected: np.ndarray,
     ) -> dict[str, AuxOutputRequestOutput]:
@@ -194,16 +191,15 @@ class AuxOutputWorkerConnector:
             emit_start = state.emit_cursor
             # Complete blocks without keys remain pending until a hash update.
             completed = buffer.capture(request_id, capture_start, rows)
-            state.capture_cursor = capture_start + len(rows)
+            token_end = capture_start + len(rows)
+            state.capture_cursor = token_end
             state.scheduled_cursor = token_start + request_num_tokens
             block_batches.append((state, completed))
 
-            token_end = capture_start + len(rows)
             if sampled > 0 and emit_start < token_end:
                 if emit_start >= capture_start:
                     output_rows = rows[emit_start - capture_start :]
-                    if isinstance(output_rows, torch.Tensor):
-                        output_rows = output_rows.cpu().numpy()
+                    output_rows = output_rows.cpu().numpy()
                     outputs[request_id] = AuxOutputRequestOutput(
                         emit_start,
                         output_rows,
@@ -242,9 +238,7 @@ class AuxOutputWorkerConnector:
 
     def _publish_blocks(
         self,
-        batches: list[
-            tuple[_WorkerRequestState, list[tuple[int, np.ndarray | torch.Tensor]]]
-        ],
+        batches: list[tuple[_WorkerRequestState, list[tuple[int, torch.Tensor]]]],
         retain_keys: Sequence[str] = (),
         release_keys: Sequence[str] = (),
     ) -> None:
@@ -277,7 +271,7 @@ class AuxOutputWorkerConnector:
 
     def begin_step(self, metadata: AuxOutputConnectorMetadata | None) -> None:
         """Apply one scheduler step's request and block-hash updates."""
-        self._step_metadata = metadata
+        self._has_step_metadata = metadata is not None
         if self._buffer is None or metadata is None:
             return
         assert not metadata.requests.keys() & metadata.finished_requests, (
@@ -304,7 +298,7 @@ class AuxOutputWorkerConnector:
                 "auxiliary output Scheduler emit cursor moved ahead"
             )
         block_batches: list[
-            tuple[_WorkerRequestState, list[tuple[int, np.ndarray | torch.Tensor]]]
+            tuple[_WorkerRequestState, list[tuple[int, torch.Tensor]]]
         ] = []
         retained_keys: list[str] = []
         for request_id, block_hashes in metadata.block_hashes.items():

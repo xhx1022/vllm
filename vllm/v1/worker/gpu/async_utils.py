@@ -162,28 +162,6 @@ class AsyncOutput(AsyncModelRunnerOutput):
                 self._has_fault = has_fault.to("cpu", non_blocking=True)
             self.copy_event.record(copy_stream)
 
-    def finish_aux_output(
-        self,
-        pending: "PendingAuxOutput",
-        main_stream: torch.cuda.Stream,
-        copy_stream: torch.cuda.Stream,
-    ) -> None:
-        """Commit auxiliary state before the next execution step."""
-        self.copy_event.synchronize()
-        with stream(copy_stream, main_stream):
-            self.model_runner_output.aux_output_connector_output = (
-                pending.connector.process_output(
-                    self.model_runner_output.req_ids,
-                    pending.token_starts,
-                    pending.query_start_loc,
-                    pending.routed_experts,
-                    self.num_sampled_tokens_np,
-                    self.num_rejected,
-                )
-            )
-        # Even a no-output chunk can leave GPU tail writes in flight.
-        copy_stream.synchronize()
-
     def get_output(self) -> ModelRunnerOutput:
         self.copy_event.synchronize()
 
