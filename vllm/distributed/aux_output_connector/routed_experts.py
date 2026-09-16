@@ -16,6 +16,7 @@ from vllm.distributed.aux_output_connector.store import (
     BlockObject,
     BlockObjectStore,
 )
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 
 @dataclass
@@ -136,7 +137,9 @@ class RoutedExpertsBuffer:
             f"available=[{tail.block_start}, {tail.block_start + tail.length})"
         )
         rows = self._rows[tail.slot, local_start:local_end]
-        return rows.to("cpu", copy=True).numpy()
+        # The caller needs independent CPU rows before this slot can be reused.
+        with gpu_sync_allowed():
+            return rows.to("cpu", copy=True).numpy()
 
     def retain_block(self, rows: torch.Tensor) -> torch.Tensor:
         """Retain one unkeyed block after the current capture call."""
@@ -212,10 +215,13 @@ def publish_routed_experts(
                 raise ValueError(
                     "auxiliary output block length does not match hash block size"
                 )
+            # Background publication must own CPU bytes, not live GPU storage.
+            with gpu_sync_allowed():
+                payload = array.cpu().numpy().tobytes(order="C")
             objects.append(
                 BlockObject(
                     key=aux_output_keys[block_index],
-                    payload=array.cpu().numpy().tobytes(order="C"),
+                    payload=payload,
                 )
             )
     store.put(

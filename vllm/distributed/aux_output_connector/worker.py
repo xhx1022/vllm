@@ -31,6 +31,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
     bind_routed_experts_capturer,
 )
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 from vllm.v1.worker.gpu.async_utils import stream
 
@@ -78,7 +79,8 @@ def finish_aux_output(
             )
         )
     # Even a no-output chunk can leave GPU tail writes in flight.
-    copy_stream.synchronize()
+    with gpu_sync_allowed():
+        copy_stream.synchronize()
 
 
 class AuxOutputWorkerConnector:
@@ -224,7 +226,9 @@ class AuxOutputWorkerConnector:
             if sampled > 0 and emit_start < token_end:
                 if emit_start >= capture_start:
                     output_rows = rows[emit_start - capture_start :]
-                    output_rows = output_rows.cpu().numpy()
+                    # Commit CPU output before the next step can reuse GPU state.
+                    with gpu_sync_allowed():
+                        output_rows = output_rows.cpu().numpy()
                     outputs[request_id] = AuxOutputRequestOutput(
                         emit_start,
                         output_rows,
