@@ -33,6 +33,7 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed.aux_output_connector.gpu_output import finish_aux_output
 from vllm.distributed.aux_output_connector.worker import AuxOutputWorkerConnector
 from vllm.distributed.parallel_state import (
     get_dcp_group,
@@ -2184,7 +2185,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         model_runner_output.ec_connector_output = ec_connector_output
 
         if pending_aux_output is not None:
-            async_output.finish_aux_output(pending_aux_output)
+            finish_aux_output(async_output, pending_aux_output)
 
         return async_output
 

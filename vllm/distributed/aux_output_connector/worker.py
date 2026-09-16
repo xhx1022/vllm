@@ -77,7 +77,7 @@ class AuxOutputWorkerConnector:
         self._buffer: RoutedExpertsBuffer | None = None
         self._requests: dict[str, _WorkerRequestState] = {}
         self._generation = 0
-        self._step_metadata: AuxOutputConnectorMetadata | None = None
+        self._has_step_metadata = False
         # Every TP rank participates in capture collectives, but only the
         # executor output rank owns the auxiliary output data plane.
         if not get_tp_group().is_first_rank:
@@ -116,8 +116,7 @@ class AuxOutputWorkerConnector:
         query_start_loc: np.ndarray,
     ) -> PendingAuxOutput | None:
         """Snapshot one step's R3 tensor for asynchronous CPU transfer."""
-        buffer = self._buffer
-        if buffer is None or self._step_metadata is None:
+        if self._buffer is None or not self._has_step_metadata:
             return None
 
         query_start_loc = query_start_loc[: len(request_ids) + 1]
@@ -191,11 +190,11 @@ class AuxOutputWorkerConnector:
             emit_start = state.emit_cursor
             # Complete blocks without keys remain pending until a hash update.
             completed = buffer.capture(request_id, capture_start, rows)
-            state.capture_cursor = capture_start + len(rows)
+            token_end = capture_start + len(rows)
+            state.capture_cursor = token_end
             state.scheduled_cursor = token_start + request_num_tokens
             block_batches.append((state, completed))
 
-            token_end = capture_start + len(rows)
             if sampled > 0 and emit_start < token_end:
                 if emit_start >= capture_start:
                     outputs[request_id] = AuxOutputRequestOutput(
@@ -269,7 +268,7 @@ class AuxOutputWorkerConnector:
 
     def begin_step(self, metadata: AuxOutputConnectorMetadata | None) -> None:
         """Apply one scheduler step's request and block-hash updates."""
-        self._step_metadata = metadata
+        self._has_step_metadata = metadata is not None
         if self._buffer is None or metadata is None:
             return
         assert not metadata.requests.keys() & metadata.finished_requests, (

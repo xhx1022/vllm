@@ -208,7 +208,7 @@ def test_non_output_rank_skips_capture_snapshot():
     worker._store = None
     worker._buffer = None
     worker._capturer = Mock()
-    worker._step_metadata = Mock()
+    worker._has_step_metadata = True
     assert worker.prepare_output([], np.array([]), np.array([])) is None
     worker._capturer.snapshot_routing_data.assert_not_called()
 
@@ -247,6 +247,34 @@ def test_completed_cpu_output_survives_terminal_cleanup():
     assert worker._requests == {}
     np.testing.assert_array_equal(result["r"].rows, rows)
     worker.close()
+
+
+def test_aux_completion_waits_before_processing():
+    """Host data must be ready; GPU tail writes must not outlive completion."""
+    from vllm.distributed.aux_output_connector import gpu_output
+
+    events = []
+    output = SimpleNamespace(
+        copy_event=SimpleNamespace(synchronize=lambda: events.append("ready")),
+        model_runner_output=SimpleNamespace(req_ids=["r"]),
+        routed_experts=None,
+        num_sampled_tokens_np=None,
+        num_rejected=None,
+    )
+
+    def process_output(*args):
+        events.append("process")
+        return {}
+
+    pending = SimpleNamespace(
+        connector=SimpleNamespace(process_output=process_output),
+        token_starts=None,
+        query_start_loc=None,
+        routed_experts=None,
+    )
+    gpu_output.finish_aux_output(output, pending)
+    assert events == ["ready", "process"]
+    assert output.model_runner_output.aux_output_connector_output == {}
 
 
 def test_worker_rejects_invalid_rejected_token_count():

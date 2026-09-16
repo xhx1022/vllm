@@ -165,20 +165,6 @@ class AsyncOutput(AsyncModelRunnerOutput):
                 self._has_fault = has_fault.to("cpu", non_blocking=True)
             self.copy_event.record(copy_stream)
 
-    def finish_aux_output(self, pending: "PendingAuxOutput") -> None:
-        """Commit auxiliary state before the next execution step."""
-        self.copy_event.synchronize()
-        self.model_runner_output.aux_output_connector_output = (
-            pending.connector.process_output(
-                self.model_runner_output.req_ids,
-                pending.token_starts,
-                pending.query_start_loc,
-                self.routed_experts,
-                self.num_sampled_tokens_np,
-                self.num_rejected,
-            )
-        )
-
     def get_output(self) -> ModelRunnerOutput:
         self.copy_event.synchronize()
 
