@@ -6,7 +6,6 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from threading import Event
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -36,6 +35,7 @@ from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.worker.gpu.async_utils import AsyncOutput
 
 
 @dataclass
@@ -55,11 +55,21 @@ class PendingAuxOutput:
     token_starts: np.ndarray
     query_start_loc: np.ndarray
     routed_experts: torch.Tensor
-    finished: Event = field(default_factory=Event)
 
-    def complete(self) -> None:
-        self.connector._pending_output = None
-        self.finished.set()
+
+def finish_aux_output(output: AsyncOutput, pending: PendingAuxOutput) -> None:
+    """Commit R3 state before the GPU runner starts its next execution step."""
+    output.copy_event.synchronize()
+    output.model_runner_output.aux_output_connector_output = (
+        pending.connector.process_output(
+            output.model_runner_output.req_ids,
+            pending.token_starts,
+            pending.query_start_loc,
+            output.routed_experts,
+            output.num_sampled_tokens_np,
+            output.num_rejected,
+        )
+    )
 
 
 class AuxOutputWorkerConnector:
@@ -83,8 +93,7 @@ class AuxOutputWorkerConnector:
         self._buffer: RoutedExpertsBuffer | None = None
         self._requests: dict[str, _WorkerRequestState] = {}
         self._generation = 0
-        self._step_metadata: AuxOutputConnectorMetadata | None = None
-        self._pending_output: PendingAuxOutput | None = None
+        self._has_step_metadata = False
         # Every TP rank participates in capture collectives, but only the
         # executor output rank owns the auxiliary output data plane.
         if not get_tp_group().is_first_rank:
@@ -123,21 +132,17 @@ class AuxOutputWorkerConnector:
         query_start_loc: np.ndarray,
     ) -> PendingAuxOutput | None:
         """Snapshot one step's R3 tensor for asynchronous CPU transfer."""
-        buffer = self._buffer
-        if buffer is None or self._step_metadata is None:
+        if self._buffer is None or not self._has_step_metadata:
             return None
-        assert self._pending_output is None
 
         query_start_loc = query_start_loc[: len(request_ids) + 1]
         num_rows = int(query_start_loc[-1])
-        pending_output = PendingAuxOutput(
+        return PendingAuxOutput(
             self,
             token_starts,
             query_start_loc,
             self._capturer.snapshot_routing_data(num_rows),
         )
-        self._pending_output = pending_output
-        return pending_output
 
     def process_output(
         self,
@@ -201,11 +206,11 @@ class AuxOutputWorkerConnector:
             emit_start = state.emit_cursor
             # Complete blocks without keys remain pending until a hash update.
             completed = buffer.capture(request_id, capture_start, rows)
-            state.capture_cursor = capture_start + len(rows)
+            token_end = capture_start + len(rows)
+            state.capture_cursor = token_end
             state.scheduled_cursor = token_start + request_num_tokens
             block_batches.append((state, completed))
 
-            token_end = capture_start + len(rows)
             if sampled > 0 and emit_start < token_end:
                 if emit_start >= capture_start:
                     outputs[request_id] = AuxOutputRequestOutput(
@@ -279,9 +284,7 @@ class AuxOutputWorkerConnector:
 
     def begin_step(self, metadata: AuxOutputConnectorMetadata | None) -> None:
         """Apply one scheduler step's request and block-hash updates."""
-        if pending_output := self._pending_output:
-            pending_output.finished.wait()
-        self._step_metadata = metadata
+        self._has_step_metadata = metadata is not None
         if self._buffer is None or metadata is None:
             return
         assert not metadata.requests.keys() & metadata.finished_requests, (
