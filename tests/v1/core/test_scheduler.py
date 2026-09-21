@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
+from collections import deque
 from concurrent.futures import Future
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -1537,6 +1538,57 @@ def test_aux_output_reset_follows_kv_reset_result(reset_successful: bool):
 
     assert scheduler.reset_prefix_cache() is reset_successful
     assert scheduler.aux_output_connector.reset.call_count == int(reset_successful)
+
+
+@pytest.mark.parametrize("aux_enabled", [False, True])
+@pytest.mark.parametrize("reset_running_requests", [False, True])
+def test_aux_reset_waits_for_aborted_batch_consumption(
+    aux_enabled, reset_running_requests
+):
+    """Aborting all requests does not consume the next async batch's output."""
+    scheduler = create_scheduler(enable_prefix_caching=True, async_scheduling=True)
+    if aux_enabled:
+        scheduler.aux_output_connector = AuxOutputSchedulerConnector()
+    (request,) = create_requests(num_requests=1)
+    scheduler.add_request(request)
+    first = scheduler.schedule()
+    second = scheduler.schedule()
+    scheduler.update_from_output(
+        first,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[1]],
+            aux_output_connector_output={
+                request.request_id: AuxRequestOutput(
+                    0, np.zeros((request.num_prompt_tokens, 1, 1), dtype=np.uint8)
+                )
+            },
+        ),
+    )
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    assert not scheduler.requests
+    assert request.num_in_flight_tokens > 0
+    if reset_running_requests:
+        scheduler.set_pause_state(PauseState.PAUSED_ALL)
+
+    core = object.__new__(EngineCore)
+    core.scheduler = scheduler
+    core.vllm_config = SimpleNamespace(
+        aux_output_config=SimpleNamespace(enabled=aux_enabled)
+    )
+    pending: Future[ModelRunnerOutput] = Future()
+    core.batch_queue = deque([(pending, second, None)])
+    assert core.reset_prefix_cache(reset_running_requests) is (not aux_enabled)
+    if aux_enabled:
+        assert scheduler.aux_output_connector._generation == 0
+
+    pending.set_result(ModelRunnerOutput([], {}, sampled_token_ids=[]))
+    future, scheduled, _ = core.batch_queue.pop()
+    scheduler.update_from_output(scheduled, future.result())
+    assert core.reset_prefix_cache(reset_running_requests)
+    if aux_enabled:
+        assert scheduler.aux_output_connector._generation == 1
 
 
 def test_kv_cache_release_after_keep_pause_preserves_requests():

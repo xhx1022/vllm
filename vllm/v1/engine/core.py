@@ -835,6 +835,10 @@ class EngineCore:
     def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False
     ) -> bool:
+        # Aborted requests may be gone while their auxiliary output is in flight.
+        # Retry after the batch queue drains, before changing the generation.
+        if self.batch_queue and self.vllm_config.aux_output_config.enabled:
+            return False
         return self.scheduler.reset_prefix_cache(
             reset_running_requests, reset_connector
         )
